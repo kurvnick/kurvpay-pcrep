@@ -3,21 +3,21 @@ KurvPay PC Rep Daily Report Generator
 Pulls data from Zoho CRM, scores reps, generates HTML, uploads to tiiny.host
 Run daily via GitHub Actions at 5am PT (12:00 UTC Mon-Fri)
 """
-
+ 
 import os
 import sys
 import json
 import requests
 from datetime import date, timedelta
 from collections import defaultdict
-
+ 
 # ── CONFIG (set as GitHub Secrets, never hardcode) ──────────────────────────
 ZOHO_CLIENT_ID     = os.environ["ZOHO_CLIENT_ID"]
 ZOHO_CLIENT_SECRET = os.environ["ZOHO_CLIENT_SECRET"]
 ZOHO_REFRESH_TOKEN = os.environ["ZOHO_REFRESH_TOKEN"]
 TIINY_API_KEY      = os.environ["TIINY_API_KEY"]
 TIINY_DOMAIN       = "paymentcloudcallstats-inday"  # subdomain only, no .tiiny.site
-
+ 
 # ── CONSTANTS ────────────────────────────────────────────────────────────────
 REP_LAST_TO_FULL = {
     "Gilden":"Brandon Gilden","Green":"Brisa Green","Heflin":"Bryan Heflin",
@@ -35,11 +35,11 @@ CONLAN = {"Kopstein","Silva","Friedhoff","McCausland","Riley","Weiss","Vartevani
 STOKOE = {"Daleske","Heflin","Travis","Villasenor","Margolis","Jackson","Lotut",
           "Koestner","Wilkie","Gilden","Bender","Carranza"}
 ALL_REPS = set(REP_LAST_TO_FULL.keys())
-
+ 
 APPROVAL_STAGES = ["Approved", "Conditionally Approved", "Auto Approved", "Auto Approved New"]
-
+ 
 GOALS = {"calls": 125, "duration": 120, "accounts": 3}
-
+ 
 # ── ZOHO AUTH ────────────────────────────────────────────────────────────────
 def get_access_token():
     r = requests.post("https://accounts.zoho.com/oauth/v2/token", data={
@@ -50,7 +50,7 @@ def get_access_token():
     })
     r.raise_for_status()
     return r.json()["access_token"]
-
+ 
 def zoho_coql(token, query):
     """Run a COQL query, paginating automatically."""
     headers = {"Authorization": f"Zoho-oauthtoken {token}"}
@@ -73,7 +73,7 @@ def zoho_coql(token, query):
             break
         offset += 200
     return records
-
+ 
 # ── DATA PULLS ───────────────────────────────────────────────────────────────
 def pull_calls(token, day_str):
     """Returns {last_name: (call_count, duration_minutes)}"""
@@ -92,7 +92,7 @@ def pull_calls(token, day_str):
             counts[owner] += 1
             secs[owner]   += (r.get("Call_Duration_in_seconds") or 0)
     return {last: (counts[last], round(secs[last] / 60, 1)) for last in ALL_REPS}
-
+ 
 def pull_accounts(token, day_str):
     """Returns {last_name: count}"""
     next_day = (date.fromisoformat(day_str) + timedelta(days=1)).isoformat()
@@ -107,7 +107,7 @@ def pull_accounts(token, day_str):
         if owner in ALL_REPS:
             counts[owner] += 1
     return dict(counts)
-
+ 
 def pull_approvals(token, day_str):
     """Returns {last_name: count} for all approval stages."""
     counts = defaultdict(int)
@@ -121,7 +121,7 @@ def pull_approvals(token, day_str):
             if owner in ALL_REPS:
                 counts[owner] += 1
     return dict(counts)
-
+ 
 # ── SCORING ──────────────────────────────────────────────────────────────────
 def score(calls, dur, accts):
     if accts >= 3:                      return 1, "accounts &ge; 3"
@@ -132,12 +132,12 @@ def score(calls, dur, accts):
     if 49 < calls <= 99 and dur > 59:   return 2, "50&ndash;99 calls, &gt;59 min"
     if dur > 89 and calls < 50:         return 2, "duration &gt; 89 min"
     return 3, "otherwise"
-
+ 
 # ── REPORT DATES ─────────────────────────────────────────────────────────────
 def today_str():
     """Returns today as ISO string."""
     return str(date.today())
-
+ 
 # ── HTML GENERATION ──────────────────────────────────────────────────────────
 CSS = """
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -232,20 +232,70 @@ tr.row-red td:first-child{border-left:3px solid var(--red)}
 @media(max-width:640px){.callout-grid,.sup-grid,.rolling-grid{grid-template-columns:1fr}th,td{padding:7px 9px}}
 @media print{body{background:#fff;padding:1rem}}
 """
-
+ 
 def badge(pts):
     cls = {1:"grn",2:"ylw",3:"red"}[pts]
     label = {1:"1-GRN",2:"2-YLW",3:"3-RED"}[pts]
     return f'<span class="badge badge-{cls}">{label}</span>'
-
+ 
 def row_cls(pts):
     return {1:"row-grn",2:"row-ylw",3:"row-red"}[pts]
-
+ 
 def fmt_day(d):
     dt = date.fromisoformat(d)
     return dt.strftime("%a %b %-d").replace(" 0"," ") if sys.platform != "win32" \
         else dt.strftime("%a %b %d").lstrip("0")
-
+ 
+def compute_rolling(token, team_set, window_days=30):
+    """Pull last ~30 business days of account data for a team."""
+    today = date.today()
+    bdays = []
+    d = today - timedelta(days=1)
+    while len(bdays) < window_days:
+        if d.weekday() < 5:
+            bdays.append(str(d))
+        d -= timedelta(days=1)
+    bdays.reverse()
+ 
+    start = bdays[0]
+    end = bdays[-1]
+    next_end = str(date.fromisoformat(end) + timedelta(days=1))
+    records = zoho_coql(token,
+        f"SELECT Owner, Created_Time FROM Accounts "
+        f"WHERE Created_Time >= '{start}T00:00:00-07:00' "
+        f"AND Created_Time < '{next_end}T00:00:00-07:00'"
+    )
+ 
+    day_rep_counts = defaultdict(lambda: defaultdict(int))
+    for r in records:
+        owner = r.get("Owner", {}).get("name", "")
+        ct = r.get("Created_Time", "")[:10]
+        if owner in team_set and ct in bdays:
+            day_rep_counts[ct][owner] += 1
+ 
+    rep_avgs = {}
+    for last in team_set:
+        total = sum(day_rep_counts[d].get(last, 0) for d in bdays)
+        rep_avgs[last] = total / len(bdays)
+ 
+    all_rep_days = [(last, day_rep_counts[d].get(last, 0)) for d in bdays for last in team_set]
+    team_avg = sum(v for _, v in all_rep_days) / len(all_rep_days)
+    pct_goal = sum(1 for _, v in all_rep_days if v >= 3) / len(all_rep_days) * 100
+ 
+    sorted_reps = sorted(rep_avgs.items(), key=lambda x: -x[1])
+    top3 = [(REP_LAST_TO_FULL[l], v) for l, v in sorted_reps[:3]]
+    bot3 = [(REP_LAST_TO_FULL[l], v) for l, v in sorted_reps[-3:]]
+ 
+    window_label = f"{fmt_day(bdays[0])} &ndash; {fmt_day(bdays[-1])} ({len(bdays)} bdays)"
+ 
+    return {
+        "n_days": len(bdays), "n_reps": len(team_set),
+        "avg_a": team_avg, "pct_goal": pct_goal,
+        "top3": top3, "bot3": bot3,
+        "window_label": window_label,
+    }
+ 
+ 
 def sup_card_inday(name, team_size, avg_a, avg_ap, pct_goal, grn, ylw, red, tot_ap, d1):
     bar_w = min(100, int(avg_a / 3 * 100))
     return f"""
@@ -285,29 +335,29 @@ def sup_card_inday(name, team_size, avg_a, avg_ap, pct_goal, grn, ylw, red, tot_
         </div>
       </div>
     </div>"""
-
-
+ 
+ 
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     print("Getting Zoho access token...")
     token = get_access_token()
-
+ 
     d1 = today_str()
     print(f"Report date: {d1} (today)")
-
+ 
     print("Pulling calls...")
     calls_d1 = pull_calls(token, d1)
-
+ 
     print("Pulling accounts...")
     accts_d1 = pull_accounts(token, d1)
-
+ 
     print("Pulling approvals...")
     apprvs_d1 = pull_approvals(token, d1)
-
+ 
     print("Pulling rolling data...")
     conlan_rolling = compute_rolling(token, CONLAN)
     stokoe_rolling = compute_rolling(token, STOKOE)
-
+ 
     # Build rows — single day, no averaging
     rows = []
     for last, name in sorted(REP_LAST_TO_FULL.items(), key=lambda x: x[1]):
@@ -318,7 +368,7 @@ def main():
         rows.append({"name": name, "last": last,
                      "ac": c1, "ad": dur1, "adl": a1, "apd": ap1,
                      "pts": pts, "reason": reason})
-
+ 
     # Team stats
     def team_stats(team_set, rows, d1_apprvs):
         tr = [r for r in rows if r["last"] in team_set]
@@ -333,10 +383,10 @@ def main():
             "pct_goal": sum(r["adl"] >= 3 for r in tr) / n * 100,
             "tot_ap_d1": sum(d1_apprvs.get(l, 0) for l in team_set),
         }
-
+ 
     conlan_stats = team_stats(CONLAN, rows, apprvs_d1)
     stokoe_stats = team_stats(STOKOE, rows, apprvs_d1)
-
+ 
     data = {
         "rows": rows,
         "conlan_stats": conlan_stats,
@@ -345,21 +395,21 @@ def main():
         "stokoe_rolling": stokoe_rolling,
         "org_tot_ap_d1": sum(apprvs_d1.values()),
     }
-
+ 
     print("Generating HTML...")
     html = generate_html(d1, data)
-
+ 
     with open("inday_report.html", "w", encoding="utf-8") as f:
         f.write(html)
     print("Saved inday_report.html")
-
+ 
     print("Uploading to tiiny.host...")
     import io, zipfile
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("index.html", html.encode("utf-8"))
     zip_buffer.seek(0)
-
+ 
     r = requests.put(
         "https://ext.tiiny.host/v1/upload",
         headers={"x-api-key": TIINY_API_KEY},
@@ -371,6 +421,6 @@ def main():
     else:
         print(f"❌ tiiny upload failed: {r.status_code} {r.text}")
         sys.exit(1)
-
+ 
 if __name__ == "__main__":
     main()

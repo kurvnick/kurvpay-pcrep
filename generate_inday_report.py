@@ -3,18 +3,18 @@ KurvPay PC In-Day Activity Report
 Pulls today's data from Zoho CRM, scores reps, generates HTML, uploads to tiiny.host
 Run every 30 min during business hours via GitHub Actions
 """
- 
+
 import os, sys, io, zipfile, requests
 from datetime import date, timedelta, datetime, timezone
 from collections import defaultdict
- 
+
 # ── CONFIG ───────────────────────────────────────────────────────────────────
 ZOHO_CLIENT_ID     = os.environ["ZOHO_CLIENT_ID"]
 ZOHO_CLIENT_SECRET = os.environ["ZOHO_CLIENT_SECRET"]
 ZOHO_REFRESH_TOKEN = os.environ["ZOHO_REFRESH_TOKEN"]
 TIINY_API_KEY      = os.environ["TIINY_API_KEY"]
 TIINY_DOMAIN       = "paymentcloudcallstats-inday.tiiny.site"
- 
+
 # ── CONSTANTS ────────────────────────────────────────────────────────────────
 REP_LAST_TO_FULL = {
     "Gilden":"Brandon Gilden","Green":"Brisa Green","Heflin":"Bryan Heflin",
@@ -33,7 +33,7 @@ STOKOE = {"Daleske","Heflin","Travis","Villasenor","Margolis","Jackson","Lotut",
           "Koestner","Wilkie","Gilden","Bender","Carranza"}
 ALL_REPS = set(REP_LAST_TO_FULL.keys())
 APPROVAL_STAGES = ["Approved", "Conditionally Approved", "Auto Approved", "Auto Approved New"]
- 
+
 # ── TIMEZONE ─────────────────────────────────────────────────────────────────
 try:
     from zoneinfo import ZoneInfo          # Python 3.9+
@@ -43,11 +43,11 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "tzdata", "-q"])
     from zoneinfo import ZoneInfo
     _PT = ZoneInfo("America/Los_Angeles")
- 
+
 def today_pt():
     """Return today's date in Pacific time as an ISO string (DST-aware)."""
     return datetime.now(_PT).strftime("%Y-%m-%d")
- 
+
 def pt_offset_str():
     """Return the current UTC offset string for Pacific time, e.g. '-07:00' or '-08:00'."""
     offset = datetime.now(_PT).utcoffset()
@@ -55,7 +55,7 @@ def pt_offset_str():
     sign = "+" if total_minutes >= 0 else "-"
     h, m = divmod(abs(total_minutes), 60)
     return f"{sign}{h:02d}:{m:02d}"
- 
+
 # ── ZOHO AUTH ────────────────────────────────────────────────────────────────
 def get_access_token():
     r = requests.post("https://accounts.zoho.com/oauth/v2/token", data={
@@ -66,7 +66,7 @@ def get_access_token():
     })
     r.raise_for_status()
     return r.json()["access_token"]
- 
+
 def zoho_coql(token, query):
     headers = {"Authorization": f"Zoho-oauthtoken {token}"}
     records = []
@@ -90,20 +90,18 @@ def zoho_coql(token, query):
             break
         offset += 200
     return records
- 
+
 # ── DATA PULLS ───────────────────────────────────────────────────────────────
 def pull_calls(token, day_str):
-    pt_now = datetime.now(_PT)
-    utc_offset_hours = -int(pt_now.utcoffset().total_seconds() // 3600)
     day = date.fromisoformat(day_str)
     next_day = day + timedelta(days=1)
-    start_utc = f"{day}T{utc_offset_hours:02d}:00:00+00:00"
-    end_utc   = f"{next_day}T{utc_offset_hours:02d}:00:00+00:00"
+    start_utc = f"{day}T00:00:00+00:00"
+    end_utc   = f"{next_day}T00:00:00+00:00"
     query = (
         f"SELECT Owner, Call_Duration_in_seconds FROM Calls "
         f"WHERE Call_Start_Time >= '{start_utc}' "
         f"AND Call_Start_Time < '{end_utc}' "
-        f"AND Call_Type != 'Missed'"
+        f"AND Call_Type not in ('Missed')"
     )
     print(f"  [calls query] {query[:140]}")
     records = zoho_coql(token, query)
@@ -124,14 +122,12 @@ def pull_calls(token, day_str):
             counts[owner] += 1
             secs[owner]   += (r.get("Call_Duration_in_seconds") or 0)
     return {last: (counts[last], round(secs[last] / 60, 1)) for last in ALL_REPS}
- 
+
 def pull_accounts(token, day_str):
-    pt_now = datetime.now(_PT)
-    utc_offset_hours = -int(pt_now.utcoffset().total_seconds() // 3600)
     day = date.fromisoformat(day_str)
     next_day = day + timedelta(days=1)
-    start_utc = f"{day}T{utc_offset_hours:02d}:00:00+00:00"
-    end_utc   = f"{next_day}T{utc_offset_hours:02d}:00:00+00:00"
+    start_utc = f"{day}T00:00:00+00:00"
+    end_utc   = f"{next_day}T00:00:00+00:00"
     query = (
         f"SELECT Owner FROM Accounts "
         f"WHERE Created_Time >= '{start_utc}' "
@@ -146,7 +142,7 @@ def pull_accounts(token, day_str):
         if owner in ALL_REPS:
             counts[owner] += 1
     return dict(counts)
- 
+
 def pull_approvals(token, day_str):
     counts = defaultdict(int)
     for stage in APPROVAL_STAGES:
@@ -163,7 +159,7 @@ def pull_approvals(token, day_str):
                 counts[owner] += 1
     print(f"  [approvals] total: {sum(counts.values())}")
     return dict(counts)
- 
+
 # ── SCORING ──────────────────────────────────────────────────────────────────
 def score(calls, dur, accts):
     if accts >= 3:                      return 1, "accounts &ge; 3"
@@ -174,22 +170,22 @@ def score(calls, dur, accts):
     if 49 < calls <= 99 and dur > 59:   return 2, "50&ndash;99 calls, &gt;59 min"
     if dur > 89 and calls < 50:         return 2, "duration &gt; 89 min"
     return 3, "otherwise"
- 
+
 # ── HELPERS ──────────────────────────────────────────────────────────────────
 def fmt_day(d):
     dt = date.fromisoformat(d)
     if sys.platform == "win32":
         return dt.strftime("%a %b %d").replace(" 0", " ")
     return dt.strftime("%a %b %-d")
- 
+
 def badge(pts):
     cls   = {1:"grn", 2:"ylw", 3:"red"}[pts]
     label = {1:"1-GRN", 2:"2-YLW", 3:"3-RED"}[pts]
     return f'<span class="badge badge-{cls}">{label}</span>'
- 
+
 def row_cls(pts):
     return {1:"row-grn", 2:"row-ylw", 3:"row-red"}[pts]
- 
+
 # ── ROLLING DATA ─────────────────────────────────────────────────────────────
 def compute_rolling(token, team_set, window_days=30):
     today = date.fromisoformat(today_pt())
@@ -200,13 +196,11 @@ def compute_rolling(token, team_set, window_days=30):
             bdays.append(str(d))
         d -= timedelta(days=1)
     bdays.reverse()
- 
+
     start    = bdays[0]
     next_end = str(date.fromisoformat(bdays[-1]) + timedelta(days=1))
-    pt_now = datetime.now(_PT)
-    utc_offset_hours = -int(pt_now.utcoffset().total_seconds() // 3600)
-    start_utc = f"{bdays[0]}T{utc_offset_hours:02d}:00:00+00:00"
-    end_utc   = f"{str(date.fromisoformat(bdays[-1]) + timedelta(days=1))}T{utc_offset_hours:02d}:00:00+00:00"
+    start_utc = f"{bdays[0]}T00:00:00+00:00"
+    end_utc   = f"{str(date.fromisoformat(bdays[-1]) + timedelta(days=1))}T00:00:00+00:00"
     records  = zoho_coql(token,
         f"SELECT Owner, Created_Time FROM Accounts "
         f"WHERE Created_Time >= '{start_utc}' "
@@ -218,24 +212,24 @@ def compute_rolling(token, team_set, window_days=30):
         ct    = r.get("Created_Time", "")[:10]
         if owner in team_set and ct in bdays:
             day_rep[ct][owner] += 1
- 
+
     rep_avgs = {last: sum(day_rep[d].get(last, 0) for d in bdays) / len(bdays)
                 for last in team_set}
     all_vals = [day_rep[d].get(last, 0) for d in bdays for last in team_set]
     team_avg = sum(all_vals) / len(all_vals)
     pct_goal = sum(1 for v in all_vals if v >= 3) / len(all_vals) * 100
- 
+
     srt  = sorted(rep_avgs.items(), key=lambda x: -x[1])
     top3 = [(REP_LAST_TO_FULL[l], v) for l, v in srt[:3]]
     bot3 = [(REP_LAST_TO_FULL[l], v) for l, v in srt[-3:]]
- 
+
     return {
         "n_days": len(bdays), "n_reps": len(team_set),
         "avg_a": team_avg, "pct_goal": pct_goal,
         "top3": top3, "bot3": bot3,
         "window_label": f"{fmt_day(bdays[0])} &ndash; {fmt_day(bdays[-1])} ({len(bdays)} bdays)",
     }
- 
+
 # ── HTML HELPERS ─────────────────────────────────────────────────────────────
 def sup_card(name, team_size, avg_a, avg_ap, pct_goal, grn, ylw, red, tot_ap, d1):
     bar_w = min(100, int(avg_a / 3 * 100))
@@ -276,7 +270,7 @@ def sup_card(name, team_size, avg_a, avg_ap, pct_goal, grn, ylw, red, tot_ap, d1
         </div>
       </div>
     </div>"""
- 
+
 def rolling_card(sup_name, team_label, n_days, n_reps, avg_a, pct_goal, top3, bot3):
     bar_w    = min(100, int(avg_a / 3 * 100))
     top_rows = "".join(
@@ -318,7 +312,7 @@ def rolling_card(sup_name, team_label, n_days, n_reps, avg_a, pct_goal, top3, bo
         </div>
       </div>
     </div>"""
- 
+
 # ── CSS ──────────────────────────────────────────────────────────────────────
 CSS = """
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -413,7 +407,7 @@ tr.row-red td:first-child{border-left:3px solid var(--red)}
 @media(max-width:640px){.callout-grid,.sup-grid,.rolling-grid{grid-template-columns:1fr}th,td{padding:7px 9px}}
 @media print{body{background:#fff;padding:1rem}}
 """
- 
+
 # ── HTML GENERATION ───────────────────────────────────────────────────────────
 def generate_html(d1, data):
     rows      = data["rows"]
@@ -427,7 +421,7 @@ def generate_html(d1, data):
     org_tot_ap = data["org_tot_ap"]
     d1_fmt     = fmt_day(d1)
     now_str    = date.today().strftime("%B %d, %Y").replace(" 0", " ")
- 
+
     table_rows = ""
     for r in rows:
         table_rows += f"""
@@ -440,26 +434,26 @@ def generate_html(d1, data):
         <td class="r">{badge(r['pts'])}</td>
         <td class="reason">{r['reason']}</td>
       </tr>"""
- 
+
     flagged = "".join(f"""
       <div class="callout-item">
         <div><div class="callout-name">{r['name']}</div>
         <div class="callout-stats">{r['ac']:.0f}c &middot; {r['ad']:.1f}m &middot; {r['adl']:.0f}a &middot; {r['apd']:.0f}ap</div></div>
         <div class="callout-note">{r['reason']}</div>
       </div>""" for r in rows if r["pts"] == 3) or '<div class="callout-item"><div>No reps flagged</div></div>'
- 
+
     greens = "".join(f"""
       <div class="callout-item">
         <div><div class="callout-name">{r['name']}</div>
         <div class="callout-stats">{r['ac']:.0f}c &middot; {r['ad']:.1f}m &middot; {r['adl']:.0f}a &middot; {r['apd']:.0f}ap</div></div>
         <div class="callout-note">{r['reason']}</div>
       </div>""" for r in rows if r["pts"] == 1) or '<div class="callout-item"><div>No green performers yet</div></div>'
- 
+
     cs = data["conlan_stats"]
     ss = data["stokoe_stats"]
     cr = data["conlan_rolling"]
     sr = data["stokoe_rolling"]
- 
+
     conlan_card = sup_card("Brandon Conlan", cs["n"], cs["avg_a"], cs["avg_ap"],
                            cs["pct_goal"], cs["grn"], cs["ylw"], cs["red"], cs["tot_ap"], d1)
     stokoe_card = sup_card("George Stokoe",  ss["n"], ss["avg_a"], ss["avg_ap"],
@@ -468,7 +462,7 @@ def generate_html(d1, data):
                                cr["n_days"], cr["n_reps"], cr["avg_a"], cr["pct_goal"], cr["top3"], cr["bot3"])
     stokoe_roll = rolling_card("George Stokoe",  "Team Rolling",
                                sr["n_days"], sr["n_reps"], sr["avg_a"], sr["pct_goal"], sr["top3"], sr["bot3"])
- 
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -551,28 +545,28 @@ def generate_html(d1, data):
 </div>
 </body>
 </html>"""
- 
+
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     print("Getting Zoho access token...")
     token = get_access_token()
- 
+
     d1 = today_pt()
     print(f"Report date: {d1} (today, Pacific time)")
- 
+
     print("Pulling calls...")
     calls = pull_calls(token, d1)
- 
+
     print("Pulling accounts...")
     accts = pull_accounts(token, d1)
- 
+
     print("Pulling approvals...")
     apprvs = pull_approvals(token, d1)
- 
+
     print("Pulling rolling data...")
     conlan_rolling = compute_rolling(token, CONLAN)
     stokoe_rolling = compute_rolling(token, STOKOE)
- 
+
     # Build rows — single day, no averaging
     rows = []
     for last, name in sorted(REP_LAST_TO_FULL.items(), key=lambda x: x[1]):
@@ -583,7 +577,7 @@ def main():
         rows.append({"name": name, "last": last,
                      "ac": c, "ad": dur, "adl": a, "apd": ap,
                      "pts": pts, "reason": reason})
- 
+
     def team_stats(team_set):
         tr  = [r for r in rows if r["last"] in team_set]
         n   = len(tr)
@@ -597,7 +591,7 @@ def main():
             "pct_goal": sum(r["adl"] >= 3 for r in tr) / n * 100,
             "tot_ap":   sum(apprvs.get(l, 0) for l in team_set),
         }
- 
+
     data = {
         "rows":           rows,
         "conlan_stats":   team_stats(CONLAN),
@@ -606,20 +600,20 @@ def main():
         "stokoe_rolling": stokoe_rolling,
         "org_tot_ap":     sum(apprvs.values()),
     }
- 
+
     print("Generating HTML...")
     html = generate_html(d1, data)
- 
+
     with open("inday_report.html", "w", encoding="utf-8") as f:
         f.write(html)
     print("Saved inday_report.html")
- 
+
     print("Uploading to tiiny.host...")
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("index.html", html.encode("utf-8"))
     zip_buf.seek(0)
- 
+
     r = requests.put(
         "https://ext.tiiny.host/v1/upload",
         headers={"x-api-key": TIINY_API_KEY},
@@ -631,6 +625,6 @@ def main():
     else:
         print(f"❌ tiiny upload failed: {r.status_code} {r.text}")
         sys.exit(1)
- 
+
 if __name__ == "__main__":
     main()

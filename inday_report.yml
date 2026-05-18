@@ -1,0 +1,35 @@
+name: PC In-Day Activity Report
+
+on:
+  schedule:
+    # Every 30 minutes, 8am–6pm PT (15:00–01:00 UTC)
+    # Runs Mon–Fri
+    - cron: '0,30 15-23 * * 1-5'
+    - cron: '0,30 0-1 * * 2-6'
+  workflow_dispatch:  # manual trigger from GitHub UI
+
+jobs:
+  generate-inday-report:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Generate and upload in-day report
+        env:
+          ZOHO_CLIENT_ID:     ${{ secrets.ZOHO_CLIENT_ID }}
+          ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
+          ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
+          TIINY_API_KEY:      ${{ secrets.TIINY_API_KEY }}
+        run: python generate_inday_report.py

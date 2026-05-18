@@ -8,7 +8,7 @@ import os
 import sys
 import json
 import requests
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from collections import defaultdict
  
 # ── CONFIG (set as GitHub Secrets, never hardcode) ──────────────────────────
@@ -37,6 +37,28 @@ STOKOE = {"Daleske","Heflin","Travis","Villasenor","Margolis","Jackson","Lotut",
 ALL_REPS = set(REP_LAST_TO_FULL.keys())
  
 APPROVAL_STAGES = ["Approved", "Conditionally Approved", "Auto Approved", "Auto Approved New"]
+ 
+# ── TIMEZONE ─────────────────────────────────────────────────────────────────
+try:
+    from zoneinfo import ZoneInfo
+    _PT = ZoneInfo("America/Los_Angeles")
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "tzdata", "-q"])
+    from zoneinfo import ZoneInfo
+    _PT = ZoneInfo("America/Los_Angeles")
+ 
+def today_pt():
+    """Return today's date in Pacific time as an ISO string (DST-aware)."""
+    return datetime.now(_PT).strftime("%Y-%m-%d")
+ 
+def pt_offset_str():
+    """Return current UTC offset string for Pacific time, e.g. '-07:00' or '-08:00'."""
+    offset = datetime.now(_PT).utcoffset()
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    h, m = divmod(abs(total_minutes), 60)
+    return f"{sign}{h:02d}:{m:02d}"
  
 GOALS = {"calls": 125, "duration": 120, "accounts": 3}
  
@@ -78,10 +100,11 @@ def zoho_coql(token, query):
 def pull_calls(token, day_str):
     """Returns {last_name: (call_count, duration_minutes)}"""
     next_day = (date.fromisoformat(day_str) + timedelta(days=1)).isoformat()
+    off = pt_offset_str()
     records = zoho_coql(token,
         f"SELECT Owner, Call_Duration_in_seconds FROM Calls "
-        f"WHERE Call_Start_Time >= '{day_str}T00:00:00-07:00' "
-        f"AND Call_Start_Time < '{next_day}T00:00:00-07:00' "
+        f"WHERE Call_Start_Time >= '{day_str}T00:00:00{off}' "
+        f"AND Call_Start_Time < '{next_day}T00:00:00{off}' "
         f"AND Call_Type != 'Missed'"
     )
     counts = defaultdict(int)
@@ -96,10 +119,11 @@ def pull_calls(token, day_str):
 def pull_accounts(token, day_str):
     """Returns {last_name: count}"""
     next_day = (date.fromisoformat(day_str) + timedelta(days=1)).isoformat()
+    off = pt_offset_str()
     records = zoho_coql(token,
         f"SELECT Owner FROM Accounts "
-        f"WHERE Created_Time >= '{day_str}T00:00:00-07:00' "
-        f"AND Created_Time < '{next_day}T00:00:00-07:00'"
+        f"WHERE Created_Time >= '{day_str}T00:00:00{off}' "
+        f"AND Created_Time < '{next_day}T00:00:00{off}'"
     )
     counts = defaultdict(int)
     for r in records:
@@ -135,8 +159,8 @@ def score(calls, dur, accts):
  
 # ── REPORT DATES ─────────────────────────────────────────────────────────────
 def last_two_business_days():
-    """Returns (day1, day2) as ISO strings — the two most recent weekdays."""
-    today = date.today()
+    """Returns (day1, day2) as ISO strings — the two most recent weekdays in PT."""
+    today = date.fromisoformat(today_pt())
     days = []
     d = today - timedelta(days=1)
     while len(days) < 2:
@@ -505,7 +529,7 @@ def generate_html(d1, d2, data):
 # ── ROLLING DATA ─────────────────────────────────────────────────────────────
 def compute_rolling(token, team_set, window_days=30):
     """Pull last ~30 business days of account data for a team."""
-    today = date.today()
+    today = date.fromisoformat(today_pt())
     bdays = []
     d = today - timedelta(days=1)
     while len(bdays) < window_days:
@@ -514,13 +538,13 @@ def compute_rolling(token, team_set, window_days=30):
         d -= timedelta(days=1)
     bdays.reverse()
  
-    # Pull all accounts in one query covering the window
     start = bdays[0]; end = bdays[-1]
     next_end = str(date.fromisoformat(end) + timedelta(days=1))
+    off = pt_offset_str()
     records = zoho_coql(token,
         f"SELECT Owner, Created_Time FROM Accounts "
-        f"WHERE Created_Time >= '{start}T00:00:00-07:00' "
-        f"AND Created_Time < '{next_end}T00:00:00-07:00'"
+        f"WHERE Created_Time >= '{start}T00:00:00{off}' "
+        f"AND Created_Time < '{next_end}T00:00:00{off}'"
     )
  
     # Bucket by date and owner

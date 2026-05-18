@@ -74,7 +74,6 @@ def get_access_token():
     return r.json()["access_token"]
  
 def zoho_coql(token, query):
-    """Run a COQL query, paginating automatically."""
     headers = {"Authorization": f"Zoho-oauthtoken {token}"}
     records = []
     offset = 0
@@ -87,8 +86,13 @@ def zoho_coql(token, query):
         )
         if r.status_code == 204:
             break
+        if r.status_code != 200:
+            print(f"  [zoho_coql] ERROR {r.status_code}: {r.text[:300]}")
+            break
         data = r.json()
         if "data" not in data or not data["data"]:
+            if "info" not in data:
+                print(f"  [zoho_coql] unexpected response: {str(data)[:300]}")
             break
         records.extend(data["data"])
         if not data.get("info", {}).get("more_records"):
@@ -583,9 +587,9 @@ def compute_rolling(token, team_set, window_days=30):
 def main():
     print("Getting Zoho access token...")
     token = get_access_token()
- 
+    print(f"  Access token obtained (ends: ...{token[-6:]})")
     d1, d2 = last_two_business_days()
-    print(f"Report period: {d1} and {d2}")
+    print(f"Report period: {d1} and {d2} (Pacific time)")
  
     print("Pulling calls...")
     calls_d1 = pull_calls(token, d1)

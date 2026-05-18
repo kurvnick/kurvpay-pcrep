@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PC Rep Performance Report — May 12 & 13, 2026</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --grn: #059669;
+    --grn-bg: #d1fae5;
+    --grn-text: #064e3b;
+    --ylw: #d97706;
+    --ylw-bg: #fef3c7;
+    --ylw-text: #78350f;
+    --red: #dc2626;
+    --red-bg: #fee2e2;
+    --red-text: #7f1d1d;
+    --ink: #1a1a1a;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --surface: #f9fafb;
+    --white: #ffffff;
+  }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: #f4f3ef;
+    color: var(--ink);
+    min-height: 100vh;
+    padding: 2.5rem 1.5rem;
+  }
+
+  .page {
+    max-width: 900px;
+    margin: 0 auto;
+  }
+
+  /* HEADER */
+  .report-header {
+    margin-bottom: 2rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .report-header .eyebrow {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+
+  .report-header h1 {
+    font-size: 26px;
+    font-weight: 600;
+    line-height: 1.2;
+    margin-bottom: 4px;
+  }
+
+  .report-header .sub {
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  /* SCORING KEY */
+  .scoring-key {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    margin-bottom: 1.5rem;
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 12px;
+  }
+
+  .key-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--muted);
+  }
+
+  .key-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  /* SUMMARY CARDS */
+  .summary-cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 1.5rem;
+  }
+
+  .card {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+
+  .card-label {
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+
+  .card-value {
+    font-size: 28px;
+    font-weight: 600;
+    line-height: 1;
+  }
+
+  .card-value.red { color: var(--red); }
+  .card-value.grn { color: var(--grn); }
+  .card-value.ylw { color: var(--ylw); }
+
+  /* TABLE */
+  .table-wrap {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 1.5rem;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  thead tr {
+    background: #f0efea;
+    border-bottom: 1px solid var(--border);
+  }
+
+  th {
+    padding: 10px 14px;
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    font-weight: 500;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  th.r { text-align: right; }
+
+  td {
+    padding: 9px 14px;
+    border-bottom: 0.5px solid var(--border);
+    color: var(--ink);
+  }
+
+  tr:last-child td { border-bottom: none; }
+
+  tr:hover td { background: #fafaf8; }
+
+  td.r {
+    text-align: right;
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 9px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
+  .badge-grn { background: var(--grn-bg); color: var(--grn-text); }
+  .badge-ylw { background: var(--ylw-bg); color: var(--ylw-text); }
+  .badge-red { background: var(--red-bg); color: var(--red-text); }
+
+  .reason {
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  /* ROW HIGHLIGHTS */
+  tr.row-grn td:first-child {
+    border-left: 3px solid var(--grn);
+  }
+  tr.row-red td:first-child {
+    border-left: 3px solid var(--red);
+  }
+  tr.row-ylw td:first-child {
+    border-left: 3px solid #fbbf24;
+  }
+
+  /* SECTIONS */
+  .sections {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 1.5rem;
+  }
+
+  .section-card {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .section-head {
+    padding: 10px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .section-head.red { background: var(--red-bg); color: var(--red-text); }
+  .section-head.grn { background: var(--grn-bg); color: var(--grn-text); }
+
+  .section-row {
+    padding: 9px 14px;
+    border-bottom: 0.5px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+  }
+
+  .section-row:last-child { border-bottom: none; }
+
+  .section-row .name { font-weight: 500; }
+  .section-row .stats { color: var(--muted); font-family: 'DM Mono', monospace; font-size: 11px; margin-top: 1px; }
+  .section-row .note { font-size: 11px; color: var(--muted); text-align: right; max-width: 140px; }
+
+  /* FOOTER */
+  .footer {
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  @media (max-width: 640px) {
+    .summary-cards { grid-template-columns: repeat(3, 1fr); }
+    .sections { grid-template-columns: 1fr; }
+    table { font-size: 12px; }
+    th, td { padding: 8px 10px; }
+    .card-value { font-size: 22px; }
+  }
+
+  @media print {
+    body { background: white; padding: 1rem; }
+    .table-wrap, .card, .section-card { box-shadow: none; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="report-header">
+    <div class="eyebrow">KurvPay &mdash; PC Rep Performance Report</div>
+    <h1>2-Day Average &mdash; Tue May 12 &amp; Wed May 13, 2026</h1>
+    <div class="sub">Metric: new accounts created &middot; each rep's calls, duration, and accounts are averaged across both days, then scored</div>
+  </div>
+
+  <div class="scoring-key">
+    <div class="key-item"><span class="key-dot" style="background:#059669"></span>1-GRN &mdash; accounts &ge; 3 OR calls &gt; 124 OR duration &gt; 119 min</div>
+    <div class="key-item"><span class="key-dot" style="background:#f59e0b"></span>2-YLW &mdash; accounts &ge; 2 or activity threshold met</div>
+    <div class="key-item"><span class="key-dot" style="background:#dc2626"></span>3-RED &mdash; below all thresholds</div>
+  </div>
+
+  <div class="summary-cards">
+    <div class="card">
+      <div class="card-label">1-GRN performers</div>
+      <div class="card-value grn">4</div>
+    </div>
+    <div class="card">
+      <div class="card-label">2-YLW middle tier</div>
+      <div class="card-value ylw">14</div>
+    </div>
+    <div class="card">
+      <div class="card-label">3-RED flagged</div>
+      <div class="card-value red">7</div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Rep</th>
+          <th class="r">Avg calls</th>
+          <th class="r">Avg dur</th>
+          <th class="r">Avg accts</th>
+          <th class="r">PTS</th>
+          <th>Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="row-ylw"><td>Brandon Gilden</td><td class="r">109.0</td><td class="r">85.3m</td><td class="r">2.0</td><td class="r"><span class="badge badge-ylw">2-YLW</span></td><td class="reason">accounts &ge; 2</td></tr>
+        <tr class="row-red"><td>Brisa Green</td><td class="r">67.5</td><td class="r">33.5m</td><td class="r">1.0</td><td class="r"><span class="badge badge-red">3-RED</span></td><td class="reason">otherwise</td></tr>
+        <tr class="row-red"><td>Bryan Heflin</td><td class="r">48.5</td><td class="r">54.9m</td><td class="r">1.0</td><td class="r"><span class="badge badge-red">3-RED</span></td><td class="reason">otherwise</td></tr>
+        <tr class="row-ylw"><td>Cheryl Kopstein</td><td class="r">70.5</td><td class="r">99.5m</td><td class="r">2.5</td><td class="r"><span class="badge badge-ylw">2-YLW</span></td><td class="reason">accounts &ge; 2</td></tr>
+        <tr class="row-ylw"><td>Daniel Jackson</td><td class="r">85.5</td><td class="r">79.0m</td><td class="r">0.5</td><td class="r"><span class="badge badge-ylw">2-YLW</span></td><td class="reason">50–99 calls, &gt;59 min</td></tr>
+        <tr class="row-grn"><td>Eric Weiss</td><td class="r">60.0</td><td class="r">95.2m</td><td class="r">3.0</td><td class="r"><span class="badge badge-grn">1-GRN</span></td><td class="reason">accounts &ge; 3</td></tr>
+        <tr class="row-ylw"><td>Faith Travis</td><td class="r">40.5</td><td class="r">61.9m</td><td class="r">2.0</td><td class="r"><span class="badge badge-ylw">2-YLW</span></td><td class="reason">accounts &ge; 2</td></tr>
+        <tr class="row-grn"><td>Frank Riffe</td><td class="r">41.0</td><td class="r">51.3m</td><td class="r">3.0</td><td class="r"><span class="badge badge-grn">1-GRN</span></td><td class="reason">accounts &ge; 3</td></tr>
+        <tr class="row-ylw"><td>Hovak Vartevanian</td><td class="r">47.0</td><td class="r">113.1m</td><td class="r">1.5</td><td class="r"><span class="badge badge-ylw">2-YLW</span></td><td class="reason">duration &gt; 89 min</td></tr>
+        <tr class="row-red"><td>Jessie Todd</td><td class="r">109.0</td><td class="r">102.1m</td><td class="r">0.0</td><td class="r"><span class="badge badge-red">3-RED</span></td><td class="reason">otherwise</td></tr>
+        <tr class="row-red"><td>John Colovas</td><td class="r">110.5</td><td class="r">92.9m</td><td class="r">1.5</td><td class="r"><span class="badge badge-red">3-RED</span></td><td class="reason">otherwise</td></tr>
+        <tr class="row-grn"><td>Jonathan Lotut</td><td class="r">66.0</td><td class="r">131.8m</td><td class="r">0.0</td><td class="r"><span class="badge badge-grn">1-GRN</span></td><td class="reason">duration &gt; 119 min</td></tr>
+        <tr class="row-ylw"><td>Jordan Koestner</td><td class="r">77.0</td><td class="r">63.9m</td><td class="r">1.0</td><td class="r"><span class="badge badge-ylw">2-YLW</span></td><td class="reason">50–99 calls, &gt;59 min</td></tr>
+        <tr class="row-ylw"><td>Julian Landeros</td><td class="r">56.5</td><td class="r">64.1m</td><td class="r">2.0</td><td class="r"><span class="badge badge-ylw">2-YLW</span></td><td class="reason">accounts &ge; 2</td></tr>
+        <tr class="row-grn"><td>Julie Margolis</td><td class="r">63.5</td><td class="r">76.4m</td><td class="r">6.0</td><td class="r"><span class="badge badge-grn">1-GRN</span></td><td class="reason">accounts &ge; 3</td></tr>
+        <tr class="row-ylw"><td>Kirstan Villasenor</td><td class="r">87.5</td><td class="r">76.8m</td><td class="r">2.0</td><td class="r"><span class="badge badge-ylw">2-YLW</span></td><td class="reason">accounts &ge; 2</td></tr>
+        <tr class="row-red"><td>Matthew Friedhoff</td><td class="r">46.5</td><td class="r">53.4m</td><td class="r">0.0</td><td class="r"><span class="badge badge-red">3-RED</span></td><td class="reason">otherwise</td></tr>
+        <tr class="row-ylw"><td>Max Crozier</td><td class="r">75.0</td><td class="r">81.8m</td><td class="r">1.0</td><td class="r"><span class="badge badge-ylw">2-YLW</span></td><td class="reason">50–99 calls, &gt;59 min</td></tr>
+        <tr class="row-ylw"><td>Melissa Daleske</td><td class="r">62.0</td><td class="r">67.6m</td><td class="r">1.5</td><td class="r"><span class="badge badge-ylw">2-YLW</span></td><td class="reason">50–99 calls, &gt;59 min</td></tr>
+        <tr class="row-ylw"><td>Nathan Wilkie</td><td class="r">59.5</td><td class="r">74.9m</td><td class="r">0.0</td><td class="r"><span class="badge badge-ylw">2-YLW</span></td><td class="reason">50–99 calls, &gt;59 min</td></tr>
+        <tr class="row-red"><td>Richard McCausland</td><td class="r">52.5</td><td class="r">56.6m</td><td class="r">0.5</td><td class="r"><span class="badge badge-red">3-RED</span></td><td class="reason">otherwise</td></tr>
+        <tr class="row-ylw"><td>Romario Carranza</td><td class="r">55.0</td><td class="r">93.5m</td><td class="r">1.5</td><td class="r"><span class="badge badge-ylw">2-YLW</span></td><td class="reason">50–99 calls, &gt;59 min</td></tr>
+        <tr class="row-red"><td>Russell Silva</td><td class="r">41.0</td><td class="r">67.0m</td><td class="r">0.5</td><td class="r"><span class="badge badge-red">3-RED</span></td><td class="reason">otherwise</td></tr>
+        <tr class="row-ylw"><td>Samantha Riley</td><td class="r">82.5</td><td class="r">106.8m</td><td class="r">2.5</td><td class="r"><span class="badge badge-ylw">2-YLW</span></td><td class="reason">accounts &ge; 2</td></tr>
+        <tr class="row-ylw"><td>Samuel Bender</td><td class="r">61.0</td><td class="r">93.7m</td><td class="r">1.0</td><td class="r"><span class="badge badge-ylw">2-YLW</span></td><td class="reason">50–99 calls, &gt;59 min</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sections">
+    <div class="section-card">
+      <div class="section-head red">&#9888; Flagged for leadflow review &mdash; 7 reps</div>
+      <div class="section-row">
+        <div><div class="name">Brisa Green</div><div class="stats">67.5c &middot; 33.5m &middot; 1.0a</div></div>
+        <div class="note">short call duration</div>
+      </div>
+      <div class="section-row">
+        <div><div class="name">Bryan Heflin</div><div class="stats">48.5c &middot; 54.9m &middot; 1.0a</div></div>
+        <div class="note">below all thresholds</div>
+      </div>
+      <div class="section-row">
+        <div><div class="name">Jessie Todd</div><div class="stats">109.0c &middot; 102.1m &middot; 0.0a</div></div>
+        <div class="note">high activity, no accounts</div>
+      </div>
+      <div class="section-row">
+        <div><div class="name">John Colovas</div><div class="stats">110.5c &middot; 92.9m &middot; 1.5a</div></div>
+        <div class="note">just short of 125 calls</div>
+      </div>
+      <div class="section-row">
+        <div><div class="name">Matthew Friedhoff</div><div class="stats">46.5c &middot; 53.4m &middot; 0.0a</div></div>
+        <div class="note">below all thresholds</div>
+      </div>
+      <div class="section-row">
+        <div><div class="name">Richard McCausland</div><div class="stats">52.5c &middot; 56.6m &middot; 0.5a</div></div>
+        <div class="note">low volume</div>
+      </div>
+      <div class="section-row">
+        <div><div class="name">Russell Silva</div><div class="stats">41.0c &middot; 67.0m &middot; 0.5a</div></div>
+        <div class="note">below all thresholds</div>
+      </div>
+    </div>
+
+    <div class="section-card">
+      <div class="section-head grn">&#10003; 1-GRN performers &mdash; 4 reps</div>
+      <div class="section-row">
+        <div><div class="name">Eric Weiss</div><div class="stats">60.0c &middot; 95.2m &middot; 3.0a</div></div>
+        <div class="note">accounts &ge; 3</div>
+      </div>
+      <div class="section-row">
+        <div><div class="name">Frank Riffe</div><div class="stats">41.0c &middot; 51.3m &middot; 3.0a</div></div>
+        <div class="note">accounts &ge; 3</div>
+      </div>
+      <div class="section-row">
+        <div><div class="name">Jonathan Lotut</div><div class="stats">66.0c &middot; 131.8m</div></div>
+        <div class="note">duration &gt; 119 min</div>
+      </div>
+      <div class="section-row">
+        <div><div class="name">Julie Margolis</div><div class="stats">63.5c &middot; 76.4m &middot; 6.0a</div></div>
+        <div class="note">accounts &ge; 3 (team high)</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span>Source: Zoho CRM &middot; auto-generated via PC Rep Dash</span>
+    <span>Tue May 12 &amp; Wed May 13, 2026</span>
+  </div>
+
+</div>
+</body>
+</html>

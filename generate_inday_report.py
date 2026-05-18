@@ -5,7 +5,7 @@ Run every 30 min during business hours via GitHub Actions
 """
  
 import os, sys, io, zipfile, requests
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, timezone
 from collections import defaultdict
  
 # ── CONFIG ───────────────────────────────────────────────────────────────────
@@ -33,6 +33,13 @@ STOKOE = {"Daleske","Heflin","Travis","Villasenor","Margolis","Jackson","Lotut",
           "Koestner","Wilkie","Gilden","Bender","Carranza"}
 ALL_REPS = set(REP_LAST_TO_FULL.keys())
 APPROVAL_STAGES = ["Approved", "Conditionally Approved", "Auto Approved", "Auto Approved New"]
+ 
+# ── TIMEZONE ─────────────────────────────────────────────────────────────────
+PT_OFFSET = timezone(timedelta(hours=-7))  # PDT (UTC-7); change to -8 in winter (PST)
+ 
+def today_pt():
+    """Return today's date in Pacific time as an ISO string."""
+    return datetime.now(PT_OFFSET).strftime("%Y-%m-%d")
  
 # ── ZOHO AUTH ────────────────────────────────────────────────────────────────
 def get_access_token():
@@ -137,7 +144,7 @@ def row_cls(pts):
  
 # ── ROLLING DATA ─────────────────────────────────────────────────────────────
 def compute_rolling(token, team_set, window_days=30):
-    today = date.today()
+    today = date.fromisoformat(today_pt())
     bdays = []
     d = today - timedelta(days=1)
     while len(bdays) < window_days:
@@ -498,8 +505,8 @@ def main():
     print("Getting Zoho access token...")
     token = get_access_token()
  
-    d1 = str(date.today())
-    print(f"Report date: {d1} (today)")
+    d1 = today_pt()
+    print(f"Report date: {d1} (today, Pacific time)")
  
     print("Pulling calls...")
     calls = pull_calls(token, d1)

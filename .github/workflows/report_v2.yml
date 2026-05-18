@@ -1,0 +1,33 @@
+name: PC Activity Report v2
+
+on:
+  schedule:
+    # 5am PT = 12:00 UTC (PDT) / 13:00 UTC (PST)
+    - cron: '0 12 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  generate-report-v2:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Generate and upload PC Activity Report v2
+        env:
+          ZOHO_CLIENT_ID:     ${{ secrets.ZOHO_CLIENT_ID }}
+          ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
+          ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
+          TIINY_API_KEY:      ${{ secrets.TIINY_API_KEY }}
+        run: python generate_report_v2.py

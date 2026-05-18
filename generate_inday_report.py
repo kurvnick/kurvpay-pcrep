@@ -73,7 +73,7 @@ def zoho_coql(token, query):
     offset = 0
     while True:
         paginated = query.rstrip() + f" LIMIT 200 OFFSET {offset}"
-        r = requests.post("https://www.zohoapis.com/crm/v2/coql",
+        r = requests.post("https://www.zohoapis.com/crm/v7/coql",
                           headers=headers, json={"select_query": paginated})
         if r.status_code == 204:
             break

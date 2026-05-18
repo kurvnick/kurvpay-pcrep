@@ -77,8 +77,13 @@ def zoho_coql(token, query):
                           headers=headers, json={"select_query": paginated})
         if r.status_code == 204:
             break
+        if r.status_code != 200:
+            print(f"  [zoho_coql] ERROR {r.status_code}: {r.text[:300]}")
+            break
         data = r.json()
         if "data" not in data or not data["data"]:
+            if "info" not in data:
+                print(f"  [zoho_coql] unexpected response: {str(data)[:300]}")
             break
         records.extend(data["data"])
         if not data.get("info", {}).get("more_records"):
@@ -90,12 +95,15 @@ def zoho_coql(token, query):
 def pull_calls(token, day_str):
     next_day = str(date.fromisoformat(day_str) + timedelta(days=1))
     off = pt_offset_str()
-    records = zoho_coql(token,
+    query = (
         f"SELECT Owner, Call_Duration_in_seconds FROM Calls "
         f"WHERE Call_Start_Time >= '{day_str}T00:00:00{off}' "
         f"AND Call_Start_Time < '{next_day}T00:00:00{off}' "
         f"AND Call_Type != 'Missed'"
     )
+    print(f"  [calls query] {query[:120]}")
+    records = zoho_coql(token, query)
+    print(f"  [calls] {len(records)} records returned")
     counts = defaultdict(int)
     secs   = defaultdict(int)
     for r in records:
@@ -108,11 +116,14 @@ def pull_calls(token, day_str):
 def pull_accounts(token, day_str):
     next_day = str(date.fromisoformat(day_str) + timedelta(days=1))
     off = pt_offset_str()
-    records = zoho_coql(token,
+    query = (
         f"SELECT Owner FROM Accounts "
         f"WHERE Created_Time >= '{day_str}T00:00:00{off}' "
         f"AND Created_Time < '{next_day}T00:00:00{off}'"
     )
+    print(f"  [accounts query] {query[:120]}")
+    records = zoho_coql(token, query)
+    print(f"  [accounts] {len(records)} records returned")
     counts = defaultdict(int)
     for r in records:
         owner = r.get("Owner", {}).get("name", "")
@@ -123,14 +134,18 @@ def pull_accounts(token, day_str):
 def pull_approvals(token, day_str):
     counts = defaultdict(int)
     for stage in APPROVAL_STAGES:
-        records = zoho_coql(token,
+        query = (
             f"SELECT Owner, Closing_Date FROM Deals "
             f"WHERE Stage = '{stage}' AND Closing_Date = '{day_str}'"
         )
+        records = zoho_coql(token, query)
+        if records:
+            print(f"  [approvals] stage='{stage}' -> {len(records)} records")
         for r in records:
             owner = r.get("Owner", {}).get("name", "")
             if owner in ALL_REPS:
                 counts[owner] += 1
+    print(f"  [approvals] total: {sum(counts.values())}")
     return dict(counts)
  
 # ── SCORING ──────────────────────────────────────────────────────────────────

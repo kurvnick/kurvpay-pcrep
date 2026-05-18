@@ -78,9 +78,10 @@ def zoho_coql(token, query):
     records = []
     offset = 0
     while True:
-        paginated = query.rstrip() + f" LIMIT 200 OFFSET {offset}"
+        # Zoho COQL requires LIMIT before OFFSET, and is finicky about spacing
+        paginated = f"{query.strip()} LIMIT 200 OFFSET {offset}"
         r = requests.post(
-            "https://www.zohoapis.com/crm/v2/coql",
+            "https://www.zohoapis.com/crm/v7/coql",
             headers=headers,
             json={"select_query": paginated},
         )

@@ -5,18 +5,18 @@ KurvPay PC Activity Report v2
 - Scoring: 5 (best) to 1 (worst)
 Runs daily via GitHub Actions, uploads to tiiny.host
 """
-
+ 
 import os, sys, io, zipfile, requests
 from datetime import date, timedelta, datetime
 from collections import defaultdict
-
+ 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
 ZOHO_CLIENT_ID     = os.environ["ZOHO_CLIENT_ID"]
 ZOHO_CLIENT_SECRET = os.environ["ZOHO_CLIENT_SECRET"]
 ZOHO_REFRESH_TOKEN = os.environ["ZOHO_REFRESH_TOKEN"]
 TIINY_API_KEY      = os.environ["TIINY_API_KEY"]
 TIINY_DOMAIN       = "paymentcloudcallstats-v2.tiiny.site"
-
+ 
 # ── CONSTANTS ────────────────────────────────────────────────────────────────
 REP_LAST_TO_FULL = {
     "Gilden":"Brandon Gilden","Green":"Brisa Green","Heflin":"Bryan Heflin",
@@ -35,7 +35,7 @@ STOKOE = {"Daleske","Heflin","Travis","Villasenor","Margolis","Jackson","Lotut",
           "Koestner","Wilkie","Gilden","Bender","Carranza"}
 ALL_REPS = set(REP_LAST_TO_FULL.keys())
 APPROVAL_STAGES = ["Approved", "Conditionally Approved", "Auto Approved", "Auto Approved New"]
-
+ 
 # ── TIMEZONE ─────────────────────────────────────────────────────────────────
 try:
     from zoneinfo import ZoneInfo
@@ -45,10 +45,10 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "tzdata", "-q"])
     from zoneinfo import ZoneInfo
     _PT = ZoneInfo("America/Los_Angeles")
-
+ 
 def today_pt():
     return datetime.now(_PT).strftime("%Y-%m-%d")
-
+ 
 def last_n_business_days(n):
     """Return list of last n business days as ISO strings, oldest first."""
     today = date.fromisoformat(today_pt())
@@ -59,7 +59,7 @@ def last_n_business_days(n):
             days.append(str(d))
         d -= timedelta(days=1)
     return list(reversed(days))
-
+ 
 # ── ZOHO AUTH ────────────────────────────────────────────────────────────────
 def get_access_token():
     r = requests.post("https://accounts.zoho.com/oauth/v2/token", data={
@@ -70,7 +70,7 @@ def get_access_token():
     })
     r.raise_for_status()
     return r.json()["access_token"]
-
+ 
 def zoho_coql(token, query):
     headers = {"Authorization": f"Zoho-oauthtoken {token}"}
     records = []
@@ -94,7 +94,7 @@ def zoho_coql(token, query):
             break
         offset += 200
     return records
-
+ 
 # ── DATA PULLS ────────────────────────────────────────────────────────────────
 def pull_calls(token, day_str):
     """2-day trailing — returns {last: (count, dur_min)}"""
@@ -116,7 +116,7 @@ def pull_calls(token, day_str):
             counts[owner] += 1
             secs[owner]   += (r.get("Call_Duration_in_seconds") or 0)
     return {last: (counts[last], round(secs[last] / 60, 1)) for last in ALL_REPS}
-
+ 
 def pull_accounts_day(token, day_str):
     """Returns {last: count} for a single day."""
     day      = date.fromisoformat(day_str)
@@ -134,7 +134,7 @@ def pull_accounts_day(token, day_str):
         if owner in ALL_REPS:
             counts[owner] += 1
     return dict(counts)
-
+ 
 def pull_approvals_day(token, day_str):
     """Returns {last: count} for a single day."""
     counts = defaultdict(int)
@@ -147,7 +147,7 @@ def pull_approvals_day(token, day_str):
             if owner in ALL_REPS:
                 counts[owner] += 1
     return dict(counts)
-
+ 
 # ── SCORING ───────────────────────────────────────────────────────────────────
 def score_v2(calls, dur, accts):
     """
@@ -169,22 +169,22 @@ def score_v2(calls, dur, accts):
     if tier2 >= 2:
         return 2, "2 of: 50+ calls / 30+ min / 1+ acct"
     return 1, "below all thresholds"
-
+ 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 def fmt_day(d):
     dt = date.fromisoformat(d)
     if sys.platform == "win32":
         return dt.strftime("%a %b %d").replace(" 0", " ")
     return dt.strftime("%a %b %-d")
-
+ 
 def badge(pts):
     colors = {5:"grn5", 4:"grn4", 3:"ylw", 2:"org", 1:"red"}
     labels = {5:"5-GRN", 4:"4-GRN", 3:"3-YLW", 2:"2-ORG", 1:"1-RED"}
     return f'<span class="badge badge-{colors[pts]}">{labels[pts]}</span>'
-
+ 
 def row_cls(pts):
     return {5:"row-5", 4:"row-4", 3:"row-3", 2:"row-2", 1:"row-1"}[pts]
-
+ 
 # ── ROLLING 30-DAY ────────────────────────────────────────────────────────────
 def compute_rolling(token, team_set, window_days=30):
     today = date.fromisoformat(today_pt())
@@ -195,7 +195,7 @@ def compute_rolling(token, team_set, window_days=30):
             bdays.append(str(d))
         d -= timedelta(days=1)
     bdays.reverse()
-
+ 
     start_utc = f"{bdays[0]}T00:00:00+00:00"
     end_utc   = f"{str(date.fromisoformat(bdays[-1]) + timedelta(days=1))}T00:00:00+00:00"
     records = zoho_coql(token,
@@ -209,24 +209,24 @@ def compute_rolling(token, team_set, window_days=30):
         ct    = r.get("Created_Time", "")[:10]
         if owner in team_set and ct in bdays:
             day_rep[ct][owner] += 1
-
+ 
     rep_avgs = {last: sum(day_rep[d].get(last, 0) for d in bdays) / len(bdays)
                 for last in team_set}
     all_vals = [day_rep[d].get(last, 0) for d in bdays for last in team_set]
     team_avg = sum(all_vals) / len(all_vals)
     pct_goal = sum(1 for v in all_vals if v >= 3) / len(all_vals) * 100
-
+ 
     srt  = sorted(rep_avgs.items(), key=lambda x: -x[1])
     top3 = [(REP_LAST_TO_FULL[l], v) for l, v in srt[:3]]
     bot3 = [(REP_LAST_TO_FULL[l], v) for l, v in srt[-3:]]
-
+ 
     return {
         "n_days": len(bdays), "n_reps": len(team_set),
         "avg_a": team_avg, "pct_goal": pct_goal,
         "top3": top3, "bot3": bot3,
         "window_label": f"{fmt_day(bdays[0])} &ndash; {fmt_day(bdays[-1])} ({len(bdays)} bdays)",
     }
-
+ 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 CSS = """
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -327,7 +327,7 @@ tr.row-1 td:first-child{border-left:3px solid var(--red)}
 @media(max-width:640px){.callout-grid,.sup-grid,.rolling-grid,.summary-row{grid-template-columns:1fr 1fr}th,td{padding:7px 9px}}
 @media print{body{background:#fff;padding:1rem}}
 """
-
+ 
 # ── HTML COMPONENTS ───────────────────────────────────────────────────────────
 def sup_card(name, team_size, avg_a, avg_ap, pct_goal, c5, c4, c3, c2, c1, tot_ap_d1, tot_ap_d2, d1, d2):
     bar_w = min(100, int(avg_a / 3 * 100))
@@ -370,7 +370,7 @@ def sup_card(name, team_size, avg_a, avg_ap, pct_goal, c5, c4, c3, c2, c1, tot_a
         </div>
       </div>
     </div>"""
-
+ 
 def rolling_card(sup_name, n_days, n_reps, avg_a, pct_goal, top3, bot3):
     bar_w    = min(100, int(avg_a / 3 * 100))
     top_rows = "".join(
@@ -412,7 +412,7 @@ def rolling_card(sup_name, n_days, n_reps, avg_a, pct_goal, top3, bot3):
         </div>
       </div>
     </div>"""
-
+ 
 # ── HTML GENERATION ───────────────────────────────────────────────────────────
 def generate_html(d1, d2, acct_days, data):
     rows = data["rows"]
@@ -427,7 +427,7 @@ def generate_html(d1, d2, acct_days, data):
     d1_fmt     = fmt_day(d1)
     d2_fmt     = fmt_day(d2)
     acct_label = " &ndash; ".join(fmt_day(d) for d in [acct_days[0], acct_days[-1]])
-
+ 
     table_rows = ""
     for r in rows:
         table_rows += f"""
@@ -440,26 +440,26 @@ def generate_html(d1, d2, acct_days, data):
         <td class="r">{badge(r['pts'])}</td>
         <td class="reason">{r['reason']}</td>
       </tr>"""
-
+ 
     flagged = "".join(f"""
       <div class="callout-item">
         <div><div class="callout-name">{r['name']}</div>
         <div class="callout-stats">{r['ac']:.1f}c &middot; {r['ad']:.1f}m &middot; {r['adl']:.2f}a &middot; {r['apd']:.1f}ap</div></div>
         <div class="callout-note">{r['reason']}</div>
-      </div>""" for r in rows if r["pts"] <= 2) or '<div class="callout-item"><div>No reps flagged</div></div>'
-
+      </div>""" for r in rows if r["pts"] == 1) or '<div class="callout-item"><div>No reps flagged</div></div>'
+ 
     greens = "".join(f"""
       <div class="callout-item">
         <div><div class="callout-name">{r['name']}</div>
         <div class="callout-stats">{r['ac']:.1f}c &middot; {r['ad']:.1f}m &middot; {r['adl']:.2f}a &middot; {r['apd']:.1f}ap</div></div>
-        <div class="callout-note">{r['reason']}</div>
-      </div>""" for r in rows if r["pts"] == 5) or '<div class="callout-item"><div>No 5-GRN performers</div></div>'
-
+        <div class="callout-note">{badge(r['pts'])}</div>
+      </div>""" for r in rows if r["pts"] >= 4) or '<div class="callout-item"><div>No top performers</div></div>'
+ 
     cs = data["conlan_stats"]
     ss = data["stokoe_stats"]
     cr = data["conlan_rolling"]
     sr = data["stokoe_rolling"]
-
+ 
     c_card = sup_card("Brandon Conlan", cs["n"], cs["avg_a"], cs["avg_ap"], cs["pct_goal"],
                       cs["c5"],cs["c4"],cs["c3"],cs["c2"],cs["c1"],
                       cs["ap_d1"], cs["ap_d2"], d1, d2)
@@ -468,7 +468,7 @@ def generate_html(d1, d2, acct_days, data):
                       ss["ap_d1"], ss["ap_d2"], d1, d2)
     c_roll = rolling_card("Brandon Conlan", cr["n_days"], cr["n_reps"], cr["avg_a"], cr["pct_goal"], cr["top3"], cr["bot3"])
     s_roll = rolling_card("George Stokoe",  sr["n_days"], sr["n_reps"], sr["avg_a"], sr["pct_goal"], sr["top3"], sr["bot3"])
-
+ 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -480,7 +480,7 @@ def generate_html(d1, d2, acct_days, data):
 </head>
 <body>
 <div class="page">
-
+ 
   <div class="masthead">
     <div>
       <div class="kicker">KurvPay &mdash; PC Activity Report v2</div>
@@ -492,12 +492,12 @@ def generate_html(d1, d2, acct_days, data):
       Approvals: Approved / Conditionally Approved / Auto Approved
     </div>
   </div>
-
+ 
   <div class="notice">
     &#9432; Accounts use a 5-day trailing average ({acct_label}).
     Calls and duration use the standard 2-day average ({d1_fmt} &amp; {d2_fmt}).
   </div>
-
+ 
   <div class="legend">
     <div class="legend-item"><span class="leg-dot" style="background:var(--grn5)"></span>5-GRN &mdash; accts &ge;3 or (150+ calls &amp; 2+ accts)</div>
     <div class="legend-item"><span class="leg-dot" style="background:var(--grn4)"></span>4-GRN &mdash; calls &ge;150 or accts &ge;2</div>
@@ -506,7 +506,7 @@ def generate_html(d1, d2, acct_days, data):
     <div class="legend-item"><span class="leg-dot" style="background:var(--red)"></span>1-RED &mdash; below all thresholds</div>
     <div class="legend-item"><span class="leg-dot" style="background:var(--pur)"></span>Approvals &mdash; informational</div>
   </div>
-
+ 
   <div class="summary-row">
     <div class="scard"><div class="scard-label">5-GRN (best)</div><div class="scard-val c5">{cnt[5]}</div></div>
     <div class="scard"><div class="scard-label">4-GRN</div><div class="scard-val c4">{cnt[4]}</div></div>
@@ -514,7 +514,7 @@ def generate_html(d1, d2, acct_days, data):
     <div class="scard"><div class="scard-label">2-ORG</div><div class="scard-val c2">{cnt[2]}</div></div>
     <div class="scard"><div class="scard-label">1-RED (worst)</div><div class="scard-val c1">{cnt[1]}</div></div>
   </div>
-
+ 
   <div class="section-title">Rep scorecard &mdash; calls/dur avg {d1_fmt} &amp; {d2_fmt} &middot; accts 5-day avg</div>
   <div class="table-wrap"><table>
     <thead><tr>
@@ -540,64 +540,127 @@ def generate_html(d1, d2, acct_days, data):
       </tr>
     </tfoot>
   </table></div>
-
+ 
   <div class="callout-grid">
     <div class="callout-box red-box">
-      <div class="callout-head">&#9888; Flagged (1-RED or 2-ORG) &mdash; {cnt[1]+cnt[2]} reps</div>
+      <div class="callout-head">&#9888; Flagged (1-RED only) &mdash; {cnt[1]} reps</div>
       {flagged}
     </div>
     <div class="callout-box grn-box">
-      <div class="callout-head">&#10003; 5-GRN performers &mdash; {cnt[5]} reps</div>
+      <div class="callout-head">&#10003; Top performers (4-GRN &amp; 5-GRN) &mdash; {cnt[4]+cnt[5]} reps</div>
       {greens}
     </div>
   </div>
-
+ 
   <div class="section-title">Supervisor team comparison</div>
   <div class="sup-grid">{c_card}{s_card}</div>
-
+ 
   <div class="section-title">Rolling data &mdash; {cr['window_label']}</div>
   <div class="rolling-grid">{c_roll}{s_roll}</div>
-
+ 
+  <div class="section-title">Analysis &amp; notes</div>
+  <div style="background:var(--white);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:1.5rem">
+    <div style="background:#f4f3ef;padding:12px 16px;font-size:13px;font-weight:600;border-bottom:1px solid var(--border)">&#128200; Performance overview</div>
+    <div style="padding:16px;display:flex;flex-direction:column;gap:16px">
+ 
+      <div style="padding-bottom:16px;border-bottom:.5px solid var(--border2)">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--ink3);margin-bottom:5px">Score distribution</div>
+        <div style="font-size:13px;color:var(--ink2);line-height:1.6">
+          <strong style="color:var(--ink)">{cnt[5]} reps at 5-GRN</strong> (best tier) &middot;
+          <strong style="color:var(--grn4)">{cnt[4]} at 4-GRN</strong> &middot;
+          <strong style="color:var(--ylw)">{cnt[3]} at 3-YLW</strong> &middot;
+          <strong style="color:var(--org)">{cnt[2]} at 2-ORG</strong> &middot;
+          <strong style="color:var(--red)">{cnt[1]} at 1-RED</strong>.
+          Combined top tier (4+5): <strong>{cnt[4]+cnt[5]} of {n} reps ({100*(cnt[4]+cnt[5])//n}%)</strong>.
+          Flagged (1-RED): <strong>{cnt[1]} reps ({100*cnt[1]//n}%)</strong>.
+        </div>
+      </div>
+ 
+      <div style="padding-bottom:16px;border-bottom:.5px solid var(--border2)">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--ink3);margin-bottom:5px">Account performance (5-day avg)</div>
+        <div style="font-size:13px;color:var(--ink2);line-height:1.6">
+          Org avg: <strong>{org_avg_a:.2f} accounts/rep/day</strong> against a goal of 3.0
+          ({min(100,int(org_avg_a/3*100))}% to goal).
+          {f'<strong style="color:var(--grn5)">{max(rows, key=lambda x: x["adl"])["name"]}</strong> leads with {max(rows, key=lambda x: x["adl"])["adl"]:.2f} avg accounts/day.' if rows else ''}
+          {f'<strong style="color:var(--red)">{min(rows, key=lambda x: x["adl"])["name"]}</strong> is lowest at {min(rows, key=lambda x: x["adl"])["adl"]:.2f} avg accounts/day.' if rows else ''}
+        </div>
+      </div>
+ 
+      <div style="padding-bottom:16px;border-bottom:.5px solid var(--border2)">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--ink3);margin-bottom:5px">Call activity (2-day avg)</div>
+        <div style="font-size:13px;color:var(--ink2);line-height:1.6">
+          Org avg: <strong>{org_avg_c:.1f} calls/rep/day</strong> &middot; <strong>{org_avg_d:.1f} min/rep/day</strong>.
+          {sum(1 for r in rows if r['ac'] >= 150)} reps averaging 150+ calls (4-GRN call threshold).
+          {sum(1 for r in rows if r['ac'] >= 100)} reps averaging 100+ calls (3-YLW call threshold).
+        </div>
+      </div>
+ 
+      <div style="padding-bottom:16px;border-bottom:.5px solid var(--border2)">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--ink3);margin-bottom:5px">Approvals</div>
+        <div style="font-size:13px;color:var(--ink2);line-height:1.6">
+          Org total: <strong style="color:var(--pur)">{org_ap_d1} ({d1_fmt})</strong> and
+          <strong style="color:var(--pur)">{org_ap_d2} ({d2_fmt})</strong> &middot;
+          avg <strong style="color:var(--pur)">{(org_ap_d1+org_ap_d2)/2:.1f}/day</strong>.
+          Conlan team: {cs['ap_d1']+cs['ap_d2']} total over 2 days.
+          Stokoe team: {ss['ap_d1']+ss['ap_d2']} total over 2 days.
+        </div>
+      </div>
+ 
+      <div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--ink3);margin-bottom:5px">Team comparison</div>
+        <div style="font-size:13px;color:var(--ink2);line-height:1.6">
+          <strong>Conlan</strong>: {cs['c5']} at 5-GRN, {cs['c4']} at 4-GRN, {cs['c1']} at 1-RED &middot;
+          avg {cs['avg_a']:.2f} accts/rep/day ({min(100,int(cs['avg_a']/3*100))}% to goal) &middot;
+          {cs['pct_goal']:.1f}% of reps at goal.<br>
+          <strong>Stokoe</strong>: {ss['c5']} at 5-GRN, {ss['c4']} at 4-GRN, {ss['c1']} at 1-RED &middot;
+          avg {ss['avg_a']:.2f} accts/rep/day ({min(100,int(ss['avg_a']/3*100))}% to goal) &middot;
+          {ss['pct_goal']:.1f}% of reps at goal.
+        </div>
+      </div>
+ 
+    </div>
+  </div>
+ 
   <div class="footer">
     <span>Source: Zoho CRM &middot; Accounts + Submissions modules &middot; PC Activity Report v2</span>
     <span>Calls/dur: {d1_fmt} &amp; {d2_fmt} &middot; Accts: {acct_label} &middot; Rolling: {cr['window_label']}</span>
   </div>
-
+ 
 </div>
 </body>
 </html>"""
-
+ 
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     print("Getting Zoho access token...")
     token = get_access_token()
-
+ 
     # 2 most recent business days for calls/duration
     call_days = last_n_business_days(2)
     d1, d2 = call_days[0], call_days[1]
     print(f"Call/dur period: {d1} & {d2}")
-
+ 
     # 5 most recent business days for accounts
     acct_days = last_n_business_days(5)
     print(f"Account period: {acct_days[0]} to {acct_days[-1]}")
-
+ 
     print("Pulling calls (2 days)...")
     calls_d1 = pull_calls(token, d1)
     calls_d2 = pull_calls(token, d2)
-
+ 
     print("Pulling accounts (5 days)...")
     accts_by_day = {}
     for d in acct_days:
         accts_by_day[d] = pull_accounts_day(token, d)
-
+ 
     print("Pulling approvals (2 days)...")
     apprvs_d1 = pull_approvals_day(token, d1)
     apprvs_d2 = pull_approvals_day(token, d2)
-
+ 
     print("Pulling rolling data...")
     conlan_rolling = compute_rolling(token, CONLAN)
     stokoe_rolling = compute_rolling(token, STOKOE)
-
+ 
     # Build rows
     rows = []
     for last, name in sorted(REP_LAST_TO_FULL.items(), key=lambda x: x[1]):
@@ -614,7 +677,7 @@ def main():
         rows.append({"name": name, "last": last,
                      "ac": ac, "ad": ad, "adl": adl, "apd": apd,
                      "pts": pts, "reason": reason})
-
+ 
     def team_stats(team_set):
         tr = [r for r in rows if r["last"] in team_set]
         n  = len(tr)
@@ -631,7 +694,7 @@ def main():
             "ap_d1":    sum(apprvs_d1.get(l, 0) for l in team_set),
             "ap_d2":    sum(apprvs_d2.get(l, 0) for l in team_set),
         }
-
+ 
     data = {
         "rows":           rows,
         "conlan_stats":   team_stats(CONLAN),
@@ -641,20 +704,20 @@ def main():
         "org_ap_d1":      sum(apprvs_d1.values()),
         "org_ap_d2":      sum(apprvs_d2.values()),
     }
-
+ 
     print("Generating HTML...")
     html = generate_html(d1, d2, acct_days, data)
-
+ 
     with open("reportv2.html", "w", encoding="utf-8") as f:
         f.write(html)
     print("Saved reportv2.html")
-
+ 
     print("Uploading to tiiny.host...")
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("index.html", html.encode("utf-8"))
     zip_buf.seek(0)
-
+ 
     r = requests.put(
         "https://ext.tiiny.host/v1/upload",
         headers={"x-api-key": TIINY_API_KEY},
@@ -666,6 +729,6 @@ def main():
     else:
         print(f"❌ tiiny upload failed: {r.status_code} {r.text}")
         sys.exit(1)
-
+ 
 if __name__ == "__main__":
     main()

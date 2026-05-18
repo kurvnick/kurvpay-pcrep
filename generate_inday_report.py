@@ -35,11 +35,26 @@ ALL_REPS = set(REP_LAST_TO_FULL.keys())
 APPROVAL_STAGES = ["Approved", "Conditionally Approved", "Auto Approved", "Auto Approved New"]
  
 # ── TIMEZONE ─────────────────────────────────────────────────────────────────
-PT_OFFSET = timezone(timedelta(hours=-7))  # PDT (UTC-7); change to -8 in winter (PST)
+try:
+    from zoneinfo import ZoneInfo          # Python 3.9+
+    _PT = ZoneInfo("America/Los_Angeles")
+except ImportError:
+    import subprocess, sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "tzdata", "-q"])
+    from zoneinfo import ZoneInfo
+    _PT = ZoneInfo("America/Los_Angeles")
  
 def today_pt():
-    """Return today's date in Pacific time as an ISO string."""
-    return datetime.now(PT_OFFSET).strftime("%Y-%m-%d")
+    """Return today's date in Pacific time as an ISO string (DST-aware)."""
+    return datetime.now(_PT).strftime("%Y-%m-%d")
+ 
+def pt_offset_str():
+    """Return the current UTC offset string for Pacific time, e.g. '-07:00' or '-08:00'."""
+    offset = datetime.now(_PT).utcoffset()
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    h, m = divmod(abs(total_minutes), 60)
+    return f"{sign}{h:02d}:{m:02d}"
  
 # ── ZOHO AUTH ────────────────────────────────────────────────────────────────
 def get_access_token():
@@ -74,10 +89,11 @@ def zoho_coql(token, query):
 # ── DATA PULLS ───────────────────────────────────────────────────────────────
 def pull_calls(token, day_str):
     next_day = str(date.fromisoformat(day_str) + timedelta(days=1))
+    off = pt_offset_str()
     records = zoho_coql(token,
         f"SELECT Owner, Call_Duration_in_seconds FROM Calls "
-        f"WHERE Call_Start_Time >= '{day_str}T00:00:00-07:00' "
-        f"AND Call_Start_Time < '{next_day}T00:00:00-07:00' "
+        f"WHERE Call_Start_Time >= '{day_str}T00:00:00{off}' "
+        f"AND Call_Start_Time < '{next_day}T00:00:00{off}' "
         f"AND Call_Type != 'Missed'"
     )
     counts = defaultdict(int)
@@ -91,10 +107,11 @@ def pull_calls(token, day_str):
  
 def pull_accounts(token, day_str):
     next_day = str(date.fromisoformat(day_str) + timedelta(days=1))
+    off = pt_offset_str()
     records = zoho_coql(token,
         f"SELECT Owner FROM Accounts "
-        f"WHERE Created_Time >= '{day_str}T00:00:00-07:00' "
-        f"AND Created_Time < '{next_day}T00:00:00-07:00'"
+        f"WHERE Created_Time >= '{day_str}T00:00:00{off}' "
+        f"AND Created_Time < '{next_day}T00:00:00{off}'"
     )
     counts = defaultdict(int)
     for r in records:
@@ -155,10 +172,11 @@ def compute_rolling(token, team_set, window_days=30):
  
     start    = bdays[0]
     next_end = str(date.fromisoformat(bdays[-1]) + timedelta(days=1))
+    off      = pt_offset_str()
     records  = zoho_coql(token,
         f"SELECT Owner, Created_Time FROM Accounts "
-        f"WHERE Created_Time >= '{start}T00:00:00-07:00' "
-        f"AND Created_Time < '{next_end}T00:00:00-07:00'"
+        f"WHERE Created_Time >= '{start}T00:00:00{off}' "
+        f"AND Created_Time < '{next_end}T00:00:00{off}'"
     )
     day_rep = defaultdict(lambda: defaultdict(int))
     for r in records:

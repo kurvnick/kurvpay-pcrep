@@ -93,15 +93,19 @@ def zoho_coql(token, query):
  
 # ── DATA PULLS ───────────────────────────────────────────────────────────────
 def pull_calls(token, day_str):
-    next_day = str(date.fromisoformat(day_str) + timedelta(days=1))
-    off = pt_offset_str()
+    pt_now = datetime.now(_PT)
+    utc_offset_hours = -int(pt_now.utcoffset().total_seconds() // 3600)
+    day = date.fromisoformat(day_str)
+    next_day = day + timedelta(days=1)
+    start_utc = f"{day}T{utc_offset_hours:02d}:00:00+00:00"
+    end_utc   = f"{next_day}T{utc_offset_hours:02d}:00:00+00:00"
     query = (
         f"SELECT Owner, Call_Duration_in_seconds FROM Calls "
-        f"WHERE Call_Start_Time >= '{day_str}T00:00:00{off}' "
-        f"AND Call_Start_Time < '{next_day}T00:00:00{off}' "
+        f"WHERE Call_Start_Time >= '{start_utc}' "
+        f"AND Call_Start_Time < '{end_utc}' "
         f"AND Call_Type != 'Missed'"
     )
-    print(f"  [calls query] {query[:120]}")
+    print(f"  [calls query] {query[:140]}")
     records = zoho_coql(token, query)
     print(f"  [calls] {len(records)} records returned")
     counts = defaultdict(int)
@@ -112,14 +116,26 @@ def pull_calls(token, day_str):
             counts[owner] += 1
             secs[owner]   += (r.get("Call_Duration_in_seconds") or 0)
     return {last: (counts[last], round(secs[last] / 60, 1)) for last in ALL_REPS}
+    counts = defaultdict(int)
+    secs   = defaultdict(int)
+    for r in records:
+        owner = r.get("Owner", {}).get("name", "")
+        if owner in ALL_REPS:
+            counts[owner] += 1
+            secs[owner]   += (r.get("Call_Duration_in_seconds") or 0)
+    return {last: (counts[last], round(secs[last] / 60, 1)) for last in ALL_REPS}
  
 def pull_accounts(token, day_str):
-    next_day = str(date.fromisoformat(day_str) + timedelta(days=1))
-    off = pt_offset_str()
+    pt_now = datetime.now(_PT)
+    utc_offset_hours = -int(pt_now.utcoffset().total_seconds() // 3600)
+    day = date.fromisoformat(day_str)
+    next_day = day + timedelta(days=1)
+    start_utc = f"{day}T{utc_offset_hours:02d}:00:00+00:00"
+    end_utc   = f"{next_day}T{utc_offset_hours:02d}:00:00+00:00"
     query = (
         f"SELECT Owner FROM Accounts "
-        f"WHERE Created_Time >= '{day_str}T00:00:00{off}' "
-        f"AND Created_Time < '{next_day}T00:00:00{off}'"
+        f"WHERE Created_Time >= '{start_utc}' "
+        f"AND Created_Time < '{end_utc}'"
     )
     print(f"  [accounts query] {query[:120]}")
     records = zoho_coql(token, query)
@@ -187,11 +203,14 @@ def compute_rolling(token, team_set, window_days=30):
  
     start    = bdays[0]
     next_end = str(date.fromisoformat(bdays[-1]) + timedelta(days=1))
-    off      = pt_offset_str()
+    pt_now = datetime.now(_PT)
+    utc_offset_hours = -int(pt_now.utcoffset().total_seconds() // 3600)
+    start_utc = f"{bdays[0]}T{utc_offset_hours:02d}:00:00+00:00"
+    end_utc   = f"{str(date.fromisoformat(bdays[-1]) + timedelta(days=1))}T{utc_offset_hours:02d}:00:00+00:00"
     records  = zoho_coql(token,
         f"SELECT Owner, Created_Time FROM Accounts "
-        f"WHERE Created_Time >= '{start}T00:00:00{off}' "
-        f"AND Created_Time < '{next_end}T00:00:00{off}'"
+        f"WHERE Created_Time >= '{start_utc}' "
+        f"AND Created_Time < '{end_utc}'"
     )
     day_rep = defaultdict(lambda: defaultdict(int))
     for r in records:

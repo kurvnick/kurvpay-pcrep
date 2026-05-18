@@ -1,23 +1,20 @@
 """
-KurvPay PC Rep Daily Report Generator
-Pulls data from Zoho CRM, scores reps, generates HTML, uploads to tiiny.host
-Run daily via GitHub Actions at 5am PT (12:00 UTC Mon-Fri)
+KurvPay PC In-Day Activity Report
+Pulls today's data from Zoho CRM, scores reps, generates HTML, uploads to tiiny.host
+Run every 30 min during business hours via GitHub Actions
 """
-
-import os
-import sys
-import json
-import requests
-from datetime import date, timedelta
+ 
+import os, sys, io, zipfile, requests
+from datetime import date, timedelta, datetime, timezone
 from collections import defaultdict
-
-# ── CONFIG (set as GitHub Secrets, never hardcode) ──────────────────────────
+ 
+# ── CONFIG ───────────────────────────────────────────────────────────────────
 ZOHO_CLIENT_ID     = os.environ["ZOHO_CLIENT_ID"]
 ZOHO_CLIENT_SECRET = os.environ["ZOHO_CLIENT_SECRET"]
 ZOHO_REFRESH_TOKEN = os.environ["ZOHO_REFRESH_TOKEN"]
 TIINY_API_KEY      = os.environ["TIINY_API_KEY"]
-TIINY_DOMAIN       = "paymentcloudcallstats-inday"  # subdomain only, no .tiiny.site
-
+TIINY_DOMAIN       = "paymentcloudcallstats-inday.tiiny.site"
+ 
 # ── CONSTANTS ────────────────────────────────────────────────────────────────
 REP_LAST_TO_FULL = {
     "Gilden":"Brandon Gilden","Green":"Brisa Green","Heflin":"Bryan Heflin",
@@ -35,11 +32,30 @@ CONLAN = {"Kopstein","Silva","Friedhoff","McCausland","Riley","Weiss","Vartevani
 STOKOE = {"Daleske","Heflin","Travis","Villasenor","Margolis","Jackson","Lotut",
           "Koestner","Wilkie","Gilden","Bender","Carranza"}
 ALL_REPS = set(REP_LAST_TO_FULL.keys())
-
 APPROVAL_STAGES = ["Approved", "Conditionally Approved", "Auto Approved", "Auto Approved New"]
-
-GOALS = {"calls": 125, "duration": 120, "accounts": 3}
-
+ 
+# ── TIMEZONE ─────────────────────────────────────────────────────────────────
+try:
+    from zoneinfo import ZoneInfo          # Python 3.9+
+    _PT = ZoneInfo("America/Los_Angeles")
+except ImportError:
+    import subprocess, sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "tzdata", "-q"])
+    from zoneinfo import ZoneInfo
+    _PT = ZoneInfo("America/Los_Angeles")
+ 
+def today_pt():
+    """Return today's date in Pacific time as an ISO string (DST-aware)."""
+    return datetime.now(_PT).strftime("%Y-%m-%d")
+ 
+def pt_offset_str():
+    """Return the current UTC offset string for Pacific time, e.g. '-07:00' or '-08:00'."""
+    offset = datetime.now(_PT).utcoffset()
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    h, m = divmod(abs(total_minutes), 60)
+    return f"{sign}{h:02d}:{m:02d}"
+ 
 # ── ZOHO AUTH ────────────────────────────────────────────────────────────────
 def get_access_token():
     r = requests.post("https://accounts.zoho.com/oauth/v2/token", data={
@@ -50,40 +66,44 @@ def get_access_token():
     })
     r.raise_for_status()
     return r.json()["access_token"]
-
+ 
 def zoho_coql(token, query):
-    """Run a COQL query, paginating automatically."""
     headers = {"Authorization": f"Zoho-oauthtoken {token}"}
     records = []
     offset = 0
     while True:
         paginated = query.rstrip() + f" LIMIT 200 OFFSET {offset}"
-        r = requests.post(
-            "https://www.zohoapis.com/crm/v2/coql",
-            headers=headers,
-            json={"select_query": paginated},
-        )
+        r = requests.post("https://www.zohoapis.com/crm/v2/coql",
+                          headers=headers, json={"select_query": paginated})
         if r.status_code == 204:
+            break
+        if r.status_code != 200:
+            print(f"  [zoho_coql] ERROR {r.status_code}: {r.text[:300]}")
             break
         data = r.json()
         if "data" not in data or not data["data"]:
+            if "info" not in data:
+                print(f"  [zoho_coql] unexpected response: {str(data)[:300]}")
             break
         records.extend(data["data"])
         if not data.get("info", {}).get("more_records"):
             break
         offset += 200
     return records
-
+ 
 # ── DATA PULLS ───────────────────────────────────────────────────────────────
 def pull_calls(token, day_str):
-    """Returns {last_name: (call_count, duration_minutes)}"""
-    next_day = (date.fromisoformat(day_str) + timedelta(days=1)).isoformat()
-    records = zoho_coql(token,
+    next_day = str(date.fromisoformat(day_str) + timedelta(days=1))
+    off = pt_offset_str()
+    query = (
         f"SELECT Owner, Call_Duration_in_seconds FROM Calls "
-        f"WHERE Call_Start_Time >= '{day_str}T00:00:00-07:00' "
-        f"AND Call_Start_Time < '{next_day}T00:00:00-07:00' "
+        f"WHERE Call_Start_Time >= '{day_str}T00:00:00{off}' "
+        f"AND Call_Start_Time < '{next_day}T00:00:00{off}' "
         f"AND Call_Type != 'Missed'"
     )
+    print(f"  [calls query] {query[:120]}")
+    records = zoho_coql(token, query)
+    print(f"  [calls] {len(records)} records returned")
     counts = defaultdict(int)
     secs   = defaultdict(int)
     for r in records:
@@ -92,36 +112,42 @@ def pull_calls(token, day_str):
             counts[owner] += 1
             secs[owner]   += (r.get("Call_Duration_in_seconds") or 0)
     return {last: (counts[last], round(secs[last] / 60, 1)) for last in ALL_REPS}
-
+ 
 def pull_accounts(token, day_str):
-    """Returns {last_name: count}"""
-    next_day = (date.fromisoformat(day_str) + timedelta(days=1)).isoformat()
-    records = zoho_coql(token,
+    next_day = str(date.fromisoformat(day_str) + timedelta(days=1))
+    off = pt_offset_str()
+    query = (
         f"SELECT Owner FROM Accounts "
-        f"WHERE Created_Time >= '{day_str}T00:00:00-07:00' "
-        f"AND Created_Time < '{next_day}T00:00:00-07:00'"
+        f"WHERE Created_Time >= '{day_str}T00:00:00{off}' "
+        f"AND Created_Time < '{next_day}T00:00:00{off}'"
     )
+    print(f"  [accounts query] {query[:120]}")
+    records = zoho_coql(token, query)
+    print(f"  [accounts] {len(records)} records returned")
     counts = defaultdict(int)
     for r in records:
         owner = r.get("Owner", {}).get("name", "")
         if owner in ALL_REPS:
             counts[owner] += 1
     return dict(counts)
-
+ 
 def pull_approvals(token, day_str):
-    """Returns {last_name: count} for all approval stages."""
     counts = defaultdict(int)
     for stage in APPROVAL_STAGES:
-        records = zoho_coql(token,
+        query = (
             f"SELECT Owner, Closing_Date FROM Deals "
             f"WHERE Stage = '{stage}' AND Closing_Date = '{day_str}'"
         )
+        records = zoho_coql(token, query)
+        if records:
+            print(f"  [approvals] stage='{stage}' -> {len(records)} records")
         for r in records:
             owner = r.get("Owner", {}).get("name", "")
             if owner in ALL_REPS:
                 counts[owner] += 1
+    print(f"  [approvals] total: {sum(counts.values())}")
     return dict(counts)
-
+ 
 # ── SCORING ──────────────────────────────────────────────────────────────────
 def score(calls, dur, accts):
     if accts >= 3:                      return 1, "accounts &ge; 3"
@@ -132,13 +158,149 @@ def score(calls, dur, accts):
     if 49 < calls <= 99 and dur > 59:   return 2, "50&ndash;99 calls, &gt;59 min"
     if dur > 89 and calls < 50:         return 2, "duration &gt; 89 min"
     return 3, "otherwise"
-
-# ── REPORT DATES ─────────────────────────────────────────────────────────────
-def today_str():
-    """Returns today as ISO string."""
-    return str(date.today())
-
-# ── HTML GENERATION ──────────────────────────────────────────────────────────
+ 
+# ── HELPERS ──────────────────────────────────────────────────────────────────
+def fmt_day(d):
+    dt = date.fromisoformat(d)
+    if sys.platform == "win32":
+        return dt.strftime("%a %b %d").replace(" 0", " ")
+    return dt.strftime("%a %b %-d")
+ 
+def badge(pts):
+    cls   = {1:"grn", 2:"ylw", 3:"red"}[pts]
+    label = {1:"1-GRN", 2:"2-YLW", 3:"3-RED"}[pts]
+    return f'<span class="badge badge-{cls}">{label}</span>'
+ 
+def row_cls(pts):
+    return {1:"row-grn", 2:"row-ylw", 3:"row-red"}[pts]
+ 
+# ── ROLLING DATA ─────────────────────────────────────────────────────────────
+def compute_rolling(token, team_set, window_days=30):
+    today = date.fromisoformat(today_pt())
+    bdays = []
+    d = today - timedelta(days=1)
+    while len(bdays) < window_days:
+        if d.weekday() < 5:
+            bdays.append(str(d))
+        d -= timedelta(days=1)
+    bdays.reverse()
+ 
+    start    = bdays[0]
+    next_end = str(date.fromisoformat(bdays[-1]) + timedelta(days=1))
+    off      = pt_offset_str()
+    records  = zoho_coql(token,
+        f"SELECT Owner, Created_Time FROM Accounts "
+        f"WHERE Created_Time >= '{start}T00:00:00{off}' "
+        f"AND Created_Time < '{next_end}T00:00:00{off}'"
+    )
+    day_rep = defaultdict(lambda: defaultdict(int))
+    for r in records:
+        owner = r.get("Owner", {}).get("name", "")
+        ct    = r.get("Created_Time", "")[:10]
+        if owner in team_set and ct in bdays:
+            day_rep[ct][owner] += 1
+ 
+    rep_avgs = {last: sum(day_rep[d].get(last, 0) for d in bdays) / len(bdays)
+                for last in team_set}
+    all_vals = [day_rep[d].get(last, 0) for d in bdays for last in team_set]
+    team_avg = sum(all_vals) / len(all_vals)
+    pct_goal = sum(1 for v in all_vals if v >= 3) / len(all_vals) * 100
+ 
+    srt  = sorted(rep_avgs.items(), key=lambda x: -x[1])
+    top3 = [(REP_LAST_TO_FULL[l], v) for l, v in srt[:3]]
+    bot3 = [(REP_LAST_TO_FULL[l], v) for l, v in srt[-3:]]
+ 
+    return {
+        "n_days": len(bdays), "n_reps": len(team_set),
+        "avg_a": team_avg, "pct_goal": pct_goal,
+        "top3": top3, "bot3": bot3,
+        "window_label": f"{fmt_day(bdays[0])} &ndash; {fmt_day(bdays[-1])} ({len(bdays)} bdays)",
+    }
+ 
+# ── HTML HELPERS ─────────────────────────────────────────────────────────────
+def sup_card(name, team_size, avg_a, avg_ap, pct_goal, grn, ylw, red, tot_ap, d1):
+    bar_w = min(100, int(avg_a / 3 * 100))
+    return f"""
+    <div class="sup-card">
+      <div class="sup-head">
+        <div class="sup-name">{name}</div>
+        <div class="sup-team-size">{team_size} reps</div>
+      </div>
+      <div class="sup-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+          <div>
+            <div class="metric-label">Avg accts / rep today</div>
+            <div class="metric-val">{avg_a:.2f}</div>
+            <div class="metric-goal">Goal: 3.0 &middot; {bar_w}% to goal</div>
+            <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:{bar_w}%"></div></div>
+          </div>
+          <div>
+            <div class="metric-label">Avg apprvs / rep today</div>
+            <div class="metric-val" style="color:var(--pur)">{avg_ap:.2f}</div>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+          <div>
+            <div class="metric-label">% reps at acct goal</div>
+            <div class="metric-val" style="font-size:16px">{pct_goal:.1f}%</div>
+          </div>
+          <div>
+            <div class="metric-label">Total apprvs today</div>
+            <div class="metric-val" style="color:var(--pur);font-size:16px">{tot_ap}</div>
+            <div class="metric-goal">{fmt_day(d1)}</div>
+          </div>
+        </div>
+        <div class="pts-dist">
+          <div class="pts-chip grn-chip"><div class="pts-num">{grn}</div><div class="pts-lbl">1-GRN</div></div>
+          <div class="pts-chip ylw-chip"><div class="pts-num">{ylw}</div><div class="pts-lbl">2-YLW</div></div>
+          <div class="pts-chip red-chip"><div class="pts-num">{red}</div><div class="pts-lbl">3-RED</div></div>
+        </div>
+      </div>
+    </div>"""
+ 
+def rolling_card(sup_name, team_label, n_days, n_reps, avg_a, pct_goal, top3, bot3):
+    bar_w    = min(100, int(avg_a / 3 * 100))
+    top_rows = "".join(
+        f'<div style="display:flex;justify-content:space-between">'
+        f'<span style="font-weight:500">{n}</span>'
+        f'<span style="font-family:\'IBM Plex Mono\',monospace;color:var(--grn)">{v:.2f}/day</span></div>'
+        for n, v in top3)
+    bot_rows = "".join(
+        f'<div style="display:flex;justify-content:space-between">'
+        f'<span style="font-weight:500">{n}</span>'
+        f'<span style="font-family:\'IBM Plex Mono\',monospace;color:var(--red)">{v:.2f}/day</span></div>'
+        for n, v in bot3)
+    return f"""
+    <div class="rolling-card">
+      <div class="rolling-head">
+        <div class="rh-name">{sup_name} &mdash; {team_label}</div>
+        <div class="rh-days">{n_days} days &middot; {n_reps} reps</div>
+      </div>
+      <div class="rolling-body">
+        <div style="display:flex;justify-content:space-between;margin-bottom:10px">
+          <div>
+            <div class="rs-label">Avg accts / rep / day</div>
+            <div class="rs-val">{avg_a:.2f}</div>
+            <div style="font-size:10px;color:var(--ink3);font-family:'IBM Plex Mono',monospace">Goal: 3.0 &middot; {bar_w}% to goal</div>
+            <div class="rs-bar-wrap"><div class="rs-bar-fill" style="width:{bar_w}%"></div></div>
+          </div>
+          <div style="text-align:right">
+            <div class="rs-label">% rep-days at goal</div>
+            <div class="rs-val" style="font-size:14px">{pct_goal:.1f}%</div>
+          </div>
+        </div>
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border2)">
+          <div class="rs-label" style="margin-bottom:8px">Top performers</div>
+          <div style="display:flex;flex-direction:column;gap:5px;font-size:12px">{top_rows}</div>
+        </div>
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border2)">
+          <div class="rs-label" style="margin-bottom:8px">Needs attention</div>
+          <div style="display:flex;flex-direction:column;gap:5px;font-size:12px">{bot_rows}</div>
+        </div>
+      </div>
+    </div>"""
+ 
+# ── CSS ──────────────────────────────────────────────────────────────────────
 CSS = """
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -232,145 +394,224 @@ tr.row-red td:first-child{border-left:3px solid var(--red)}
 @media(max-width:640px){.callout-grid,.sup-grid,.rolling-grid{grid-template-columns:1fr}th,td{padding:7px 9px}}
 @media print{body{background:#fff;padding:1rem}}
 """
-
-def badge(pts):
-    cls = {1:"grn",2:"ylw",3:"red"}[pts]
-    label = {1:"1-GRN",2:"2-YLW",3:"3-RED"}[pts]
-    return f'<span class="badge badge-{cls}">{label}</span>'
-
-def row_cls(pts):
-    return {1:"row-grn",2:"row-ylw",3:"row-red"}[pts]
-
-def fmt_day(d):
-    dt = date.fromisoformat(d)
-    return dt.strftime("%a %b %-d").replace(" 0"," ") if sys.platform != "win32" \
-        else dt.strftime("%a %b %d").lstrip("0")
-
-def sup_card_inday(name, team_size, avg_a, avg_ap, pct_goal, grn, ylw, red, tot_ap, d1):
-    bar_w = min(100, int(avg_a / 3 * 100))
-    return f"""
-    <div class="sup-card">
-      <div class="sup-head">
-        <div class="sup-name">{name}</div>
-        <div class="sup-team-size">{team_size} reps</div>
-      </div>
-      <div class="sup-body">
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
-          <div>
-            <div class="metric-label">Avg accts / rep today</div>
-            <div class="metric-val">{avg_a:.2f}</div>
-            <div class="metric-goal">Goal: 3.0 &middot; {bar_w}% to goal</div>
-            <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:{bar_w}%"></div></div>
-          </div>
-          <div>
-            <div class="metric-label">Avg apprvs / rep today</div>
-            <div class="metric-val" style="color:var(--pur)">{avg_ap:.2f}</div>
-          </div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
-          <div>
-            <div class="metric-label">% reps at acct goal</div>
-            <div class="metric-val" style="font-size:16px">{pct_goal:.1f}%</div>
-          </div>
-          <div>
-            <div class="metric-label">Total apprvs today</div>
-            <div class="metric-val" style="color:var(--pur);font-size:16px">{tot_ap}</div>
-            <div class="metric-goal">{fmt_day(d1)}</div>
-          </div>
-        </div>
-        <div class="pts-dist">
-          <div class="pts-chip grn-chip"><div class="pts-num">{grn}</div><div class="pts-lbl">1-GRN</div></div>
-          <div class="pts-chip ylw-chip"><div class="pts-num">{ylw}</div><div class="pts-lbl">2-YLW</div></div>
-          <div class="pts-chip red-chip"><div class="pts-num">{red}</div><div class="pts-lbl">3-RED</div></div>
-        </div>
-      </div>
-    </div>"""
-
-
+ 
+# ── HTML GENERATION ───────────────────────────────────────────────────────────
+def generate_html(d1, data):
+    rows      = data["rows"]
+    grn_count = sum(1 for r in rows if r["pts"] == 1)
+    ylw_count = sum(1 for r in rows if r["pts"] == 2)
+    red_count = sum(1 for r in rows if r["pts"] == 3)
+    n         = len(rows)
+    org_avg_c  = sum(r["ac"]  for r in rows) / n
+    org_avg_d  = sum(r["ad"]  for r in rows) / n
+    org_avg_a  = sum(r["adl"] for r in rows) / n
+    org_tot_ap = data["org_tot_ap"]
+    d1_fmt     = fmt_day(d1)
+    now_str    = date.today().strftime("%B %d, %Y").replace(" 0", " ")
+ 
+    table_rows = ""
+    for r in rows:
+        table_rows += f"""
+      <tr class="{row_cls(r['pts'])}">
+        <td class="rep-name">{r['name']}</td>
+        <td class="r">{r['ac']:.0f}</td>
+        <td class="r">{r['ad']:.1f}m</td>
+        <td class="r">{r['adl']:.0f}</td>
+        <td class="approvals">{r['apd']:.0f}</td>
+        <td class="r">{badge(r['pts'])}</td>
+        <td class="reason">{r['reason']}</td>
+      </tr>"""
+ 
+    flagged = "".join(f"""
+      <div class="callout-item">
+        <div><div class="callout-name">{r['name']}</div>
+        <div class="callout-stats">{r['ac']:.0f}c &middot; {r['ad']:.1f}m &middot; {r['adl']:.0f}a &middot; {r['apd']:.0f}ap</div></div>
+        <div class="callout-note">{r['reason']}</div>
+      </div>""" for r in rows if r["pts"] == 3) or '<div class="callout-item"><div>No reps flagged</div></div>'
+ 
+    greens = "".join(f"""
+      <div class="callout-item">
+        <div><div class="callout-name">{r['name']}</div>
+        <div class="callout-stats">{r['ac']:.0f}c &middot; {r['ad']:.1f}m &middot; {r['adl']:.0f}a &middot; {r['apd']:.0f}ap</div></div>
+        <div class="callout-note">{r['reason']}</div>
+      </div>""" for r in rows if r["pts"] == 1) or '<div class="callout-item"><div>No green performers yet</div></div>'
+ 
+    cs = data["conlan_stats"]
+    ss = data["stokoe_stats"]
+    cr = data["conlan_rolling"]
+    sr = data["stokoe_rolling"]
+ 
+    conlan_card = sup_card("Brandon Conlan", cs["n"], cs["avg_a"], cs["avg_ap"],
+                           cs["pct_goal"], cs["grn"], cs["ylw"], cs["red"], cs["tot_ap"], d1)
+    stokoe_card = sup_card("George Stokoe",  ss["n"], ss["avg_a"], ss["avg_ap"],
+                           ss["pct_goal"], ss["grn"], ss["ylw"], ss["red"], ss["tot_ap"], d1)
+    conlan_roll = rolling_card("Brandon Conlan", "Team Rolling",
+                               cr["n_days"], cr["n_reps"], cr["avg_a"], cr["pct_goal"], cr["top3"], cr["bot3"])
+    stokoe_roll = rolling_card("George Stokoe",  "Team Rolling",
+                               sr["n_days"], sr["n_reps"], sr["avg_a"], sr["pct_goal"], sr["top3"], sr["bot3"])
+ 
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PC In-Day Activity Report &mdash; {d1_fmt}</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>{CSS}</style>
+</head>
+<body>
+<div class="page">
+  <div class="masthead">
+    <div>
+      <div class="kicker">KurvPay &mdash; PC In-Day Activity Report</div>
+      <h1>Today &mdash; {d1_fmt}</h1>
+    </div>
+    <div class="masthead-right">
+      Metric: new accounts created today<br>
+      Scoring: accounts &ge;3 OR calls &gt;124 OR dur &gt;119 min &rarr; 1-GRN<br>
+      Approvals: Approved / Conditionally Approved / Auto Approved
+    </div>
+  </div>
+  <div class="goals-bar">
+    <div class="goal-chip"><span class="label">Daily goal:</span> 3 new accounts</div>
+    <div class="goal-chip"><span class="label">Daily goal:</span> 125 calls</div>
+    <div class="goal-chip"><span class="label">Daily goal:</span> 120 min talk time</div>
+  </div>
+  <div class="legend">
+    <div class="legend-item"><span class="leg-dot" style="background:var(--grn)"></span>1-GRN &mdash; accounts &ge;3 OR calls &gt;124 OR dur &gt;119 min</div>
+    <div class="legend-item"><span class="leg-dot" style="background:#f5b800"></span>2-YLW &mdash; accounts &ge;2 or activity threshold met</div>
+    <div class="legend-item"><span class="leg-dot" style="background:var(--red)"></span>3-RED &mdash; below all thresholds</div>
+    <div class="legend-item"><span class="leg-dot" style="background:var(--pur)"></span>Approvals &mdash; informational, does not affect PTS</div>
+  </div>
+  <div class="summary-row">
+    <div class="scard"><div class="scard-label">1-GRN performers</div><div class="scard-val grn">{grn_count}</div></div>
+    <div class="scard"><div class="scard-label">2-YLW middle tier</div><div class="scard-val ylw">{ylw_count}</div></div>
+    <div class="scard"><div class="scard-label">3-RED flagged</div><div class="scard-val red">{red_count}</div></div>
+  </div>
+  <div class="section-title">Rep scorecard &mdash; today, {d1_fmt}</div>
+  <div class="table-wrap"><table>
+    <thead><tr>
+      <th>Rep</th>
+      <th class="r">Calls</th>
+      <th class="r">Duration</th>
+      <th class="r">Accounts</th>
+      <th class="r" style="color:var(--pur)">Approvals</th>
+      <th class="r">PTS</th>
+      <th>Reason</th>
+    </tr></thead>
+    <tbody>{table_rows}</tbody>
+    <tfoot>
+      <tr style="background:#f4f3ef;border-top:1.5px solid var(--border)">
+        <td style="font-family:'IBM Plex Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink3);font-weight:500;padding:9px 12px">Org avg &mdash; {n} reps</td>
+        <td class="r" style="font-weight:600;padding:9px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px">{org_avg_c:.1f} avg</td>
+        <td class="r" style="font-weight:600;padding:9px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px">{org_avg_d:.1f}m avg</td>
+        <td class="r" style="font-weight:600;padding:9px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px">{org_avg_a:.2f} avg</td>
+        <td style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--pur);font-weight:600;padding:9px 12px">{org_tot_ap} total</td>
+        <td colspan="2" style="padding:9px 12px;font-size:11px;color:var(--ink3);font-family:'IBM Plex Mono',monospace">today&apos;s activity only &middot; as of {now_str}</td>
+      </tr>
+    </tfoot>
+  </table></div>
+  <div class="callout-grid">
+    <div class="callout-box red-box">
+      <div class="callout-head">&#9888; Flagged for leadflow review &mdash; {red_count} reps</div>
+      {flagged}
+    </div>
+    <div class="callout-box grn-box">
+      <div class="callout-head">&#10003; 1-GRN performers &mdash; {grn_count} reps</div>
+      {greens}
+    </div>
+  </div>
+  <div class="section-title">Supervisor team comparison &mdash; today, {d1_fmt}</div>
+  <div class="sup-grid">{conlan_card}{stokoe_card}</div>
+  <div class="section-title">Rolling data &mdash; {cr['window_label']}</div>
+  <div class="rolling-grid">{conlan_roll}{stokoe_roll}</div>
+  <div class="footer">
+    <span>Source: Zoho CRM &middot; Accounts + Submissions modules &middot; auto-generated</span>
+    <span>Today: {d1_fmt} &middot; Rolling: {cr['window_label']}</span>
+  </div>
+</div>
+</body>
+</html>"""
+ 
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     print("Getting Zoho access token...")
     token = get_access_token()
-
-    d1 = today_str()
-    print(f"Report date: {d1} (today)")
-
+ 
+    d1 = today_pt()
+    print(f"Report date: {d1} (today, Pacific time)")
+ 
     print("Pulling calls...")
-    calls_d1 = pull_calls(token, d1)
-
+    calls = pull_calls(token, d1)
+ 
     print("Pulling accounts...")
-    accts_d1 = pull_accounts(token, d1)
-
+    accts = pull_accounts(token, d1)
+ 
     print("Pulling approvals...")
-    apprvs_d1 = pull_approvals(token, d1)
-
+    apprvs = pull_approvals(token, d1)
+ 
     print("Pulling rolling data...")
     conlan_rolling = compute_rolling(token, CONLAN)
     stokoe_rolling = compute_rolling(token, STOKOE)
-
+ 
     # Build rows — single day, no averaging
     rows = []
     for last, name in sorted(REP_LAST_TO_FULL.items(), key=lambda x: x[1]):
-        c1, dur1 = calls_d1[last]
-        a1 = accts_d1.get(last, 0)
-        ap1 = apprvs_d1.get(last, 0)
-        pts, reason = score(c1, dur1, a1)
+        c, dur = calls[last]
+        a      = accts.get(last, 0)
+        ap     = apprvs.get(last, 0)
+        pts, reason = score(c, dur, a)
         rows.append({"name": name, "last": last,
-                     "ac": c1, "ad": dur1, "adl": a1, "apd": ap1,
+                     "ac": c, "ad": dur, "adl": a, "apd": ap,
                      "pts": pts, "reason": reason})
-
-    # Team stats
-    def team_stats(team_set, rows, d1_apprvs):
-        tr = [r for r in rows if r["last"] in team_set]
-        n = len(tr)
+ 
+    def team_stats(team_set):
+        tr  = [r for r in rows if r["last"] in team_set]
+        n   = len(tr)
         return {
-            "n": n,
-            "grn": sum(r["pts"]==1 for r in tr),
-            "ylw": sum(r["pts"]==2 for r in tr),
-            "red": sum(r["pts"]==3 for r in tr),
-            "avg_a":  sum(r["adl"] for r in tr) / n,
-            "avg_ap": sum(r["apd"] for r in tr) / n,
+            "n":        n,
+            "grn":      sum(r["pts"] == 1 for r in tr),
+            "ylw":      sum(r["pts"] == 2 for r in tr),
+            "red":      sum(r["pts"] == 3 for r in tr),
+            "avg_a":    sum(r["adl"] for r in tr) / n,
+            "avg_ap":   sum(r["apd"] for r in tr) / n,
             "pct_goal": sum(r["adl"] >= 3 for r in tr) / n * 100,
-            "tot_ap_d1": sum(d1_apprvs.get(l, 0) for l in team_set),
+            "tot_ap":   sum(apprvs.get(l, 0) for l in team_set),
         }
-
-    conlan_stats = team_stats(CONLAN, rows, apprvs_d1)
-    stokoe_stats = team_stats(STOKOE, rows, apprvs_d1)
-
+ 
     data = {
-        "rows": rows,
-        "conlan_stats": conlan_stats,
-        "stokoe_stats": stokoe_stats,
+        "rows":           rows,
+        "conlan_stats":   team_stats(CONLAN),
+        "stokoe_stats":   team_stats(STOKOE),
         "conlan_rolling": conlan_rolling,
         "stokoe_rolling": stokoe_rolling,
-        "org_tot_ap_d1": sum(apprvs_d1.values()),
+        "org_tot_ap":     sum(apprvs.values()),
     }
-
+ 
     print("Generating HTML...")
     html = generate_html(d1, data)
-
+ 
     with open("inday_report.html", "w", encoding="utf-8") as f:
         f.write(html)
     print("Saved inday_report.html")
-
+ 
     print("Uploading to tiiny.host...")
-    import io, zipfile
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("index.html", html.encode("utf-8"))
-    zip_buffer.seek(0)
-
+    zip_buf.seek(0)
+ 
     r = requests.put(
         "https://ext.tiiny.host/v1/upload",
         headers={"x-api-key": TIINY_API_KEY},
-        files={"files": ("report.zip", zip_buffer, "application/zip")},
-        data={"domain": f"{TIINY_DOMAIN}.tiiny.site"},
+        files={"files": ("report.zip", zip_buf, "application/zip")},
+        data={"domain": TIINY_DOMAIN},
     )
     if r.status_code == 200:
-        print(f"✅ Report live at https://{TIINY_DOMAIN}.tiiny.site/")
+        print(f"✅ Report live at https://{TIINY_DOMAIN}/")
     else:
         print(f"❌ tiiny upload failed: {r.status_code} {r.text}")
         sys.exit(1)
-
+ 
 if __name__ == "__main__":
     main()

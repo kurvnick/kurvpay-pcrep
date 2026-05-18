@@ -103,28 +103,34 @@ def zoho_coql(token, query):
 
 # ── DATA PULLS ───────────────────────────────────────────────────────────────
 def pull_calls(token, day_str):
-    """Returns {last_name: (call_count, duration_minutes)}
-    Uses UTC boundaries: PT midnight = UTC+7 or UTC+8 depending on DST."""
-    day = date.fromisoformat(day_str)
-    next_day = day + timedelta(days=1)
+    """Returns {last_name: (call_count, duration_minutes)}.
+    Zoho COQL does not support two range conditions on the same datetime field,
+    so we query from start of day forward and filter the upper bound in Python."""
+    day       = date.fromisoformat(day_str)
+    next_day  = day + timedelta(days=1)
     start_utc = f"{day}T00:00:00+00:00"
-    end_utc   = f"{next_day}T00:00:00+00:00"
+    # Store next_day string for Python-side filtering
+    next_day_str = str(next_day)
     query = (
-        f"SELECT Owner, Call_Duration_in_seconds FROM Calls "
+        f"SELECT Owner, Call_Duration_in_seconds, Call_Start_Time FROM Calls "
         f"WHERE Call_Start_Time >= '{start_utc}' "
-        f"AND Call_Start_Time < '{end_utc}' "
         f"AND Call_Type not in ('Missed')"
     )
     print(f"  [calls query] {query[:140]}")
     records = zoho_coql(token, query)
-    print(f"  [calls] {len(records)} records returned")
+    print(f"  [calls] {len(records)} raw records, filtering to {day_str}")
     counts = defaultdict(int)
     secs   = defaultdict(int)
     for r in records:
+        # Filter upper bound in Python — keep only records from day_str
+        cst = r.get("Call_Start_Time", "")
+        if not cst or cst[:10] != day_str:
+            continue
         owner = r.get("Owner", {}).get("name", "")
         if owner in ALL_REPS:
             counts[owner] += 1
             secs[owner]   += (r.get("Call_Duration_in_seconds") or 0)
+    print(f"  [calls] {sum(counts.values())} records matched {day_str}")
     return {last: (counts[last], round(secs[last] / 60, 1)) for last in ALL_REPS}
     counts = defaultdict(int)
     secs   = defaultdict(int)

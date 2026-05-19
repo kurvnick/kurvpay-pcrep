@@ -171,14 +171,17 @@ def pull_approvals(token, day_str):
 
 # ── SCORING ──────────────────────────────────────────────────────────────────
 def score(calls, dur, accts):
-    if accts >= 3:                      return 1, "accounts &ge; 3"
-    if calls > 124:                     return 1, "calls &gt; 124"
-    if dur > 119:                       return 1, "duration &gt; 119 min"
-    if accts >= 2:                      return 2, "accounts &ge; 2"
-    if 99 < calls <= 149 and dur < 60:  return 2, "100&ndash;149 calls, &lt;60 min"
-    if 49 < calls <= 99 and dur > 59:   return 2, "50&ndash;99 calls, &gt;59 min"
-    if dur > 89 and calls < 50:         return 2, "duration &gt; 89 min"
-    return 3, "otherwise"
+    if accts >= 3 or (calls >= 150 and accts >= 2):
+        return 5, "accts &ge;3, or 150+ calls &amp; 2+ accts"
+    if calls >= 150 or accts >= 2:
+        return 4, "calls &ge;150 or accts &ge;2"
+    tier3 = sum([calls >= 100, dur >= 60, accts >= 1])
+    if tier3 >= 2:
+        return 3, "2 of: 100+ calls / 60+ min / 1+ acct"
+    tier2 = sum([calls >= 50, dur >= 30, accts >= 1])
+    if tier2 >= 2:
+        return 2, "2 of: 50+ calls / 30+ min / 1+ acct"
+    return 1, "below all thresholds"
 
 # ── HELPERS ──────────────────────────────────────────────────────────────────
 def fmt_day(d):
@@ -193,12 +196,12 @@ def now_pt_str():
         else datetime.now(_PT).strftime("%b %d, %Y %I:%M %p PT").replace(" 0", " ")
 
 def badge(pts):
-    cls   = {1:"grn", 2:"ylw", 3:"red"}[pts]
-    label = {1:"1-GRN", 2:"2-YLW", 3:"3-RED"}[pts]
+    cls   = {5:"grn5", 4:"blu4", 3:"ylw", 2:"org", 1:"red"}[pts]
+    label = {5:"5-GRN", 4:"4-BLU", 3:"3-YLW", 2:"2-ORG", 1:"1-RED"}[pts]
     return f'<span class="badge badge-{cls}">{label}</span>'
 
 def row_cls(pts):
-    return {1:"row-grn", 2:"row-ylw", 3:"row-red"}[pts]
+    return {5:"row-5", 4:"row-4", 3:"row-3", 2:"row-2", 1:"row-1"}[pts]
 
 # ── ROLLING DATA ─────────────────────────────────────────────────────────────
 def compute_rolling(token, team_set, window_days=30):
@@ -245,7 +248,7 @@ def compute_rolling(token, team_set, window_days=30):
     }
 
 # ── HTML HELPERS ─────────────────────────────────────────────────────────────
-def sup_card(name, team_size, avg_a, avg_ap, pct_goal, grn, ylw, red, tot_ap, d1):
+def sup_card(name, team_size, avg_a, avg_ap, pct_goal, c5, c4, c3, c2, c1, tot_ap, d1):
     bar_w = min(100, int(avg_a / 3 * 100))
     return f"""
     <div class="sup-card">
@@ -278,9 +281,11 @@ def sup_card(name, team_size, avg_a, avg_ap, pct_goal, grn, ylw, red, tot_ap, d1
           </div>
         </div>
         <div class="pts-dist">
-          <div class="pts-chip grn-chip"><div class="pts-num">{grn}</div><div class="pts-lbl">1-GRN</div></div>
-          <div class="pts-chip ylw-chip"><div class="pts-num">{ylw}</div><div class="pts-lbl">2-YLW</div></div>
-          <div class="pts-chip red-chip"><div class="pts-num">{red}</div><div class="pts-lbl">3-RED</div></div>
+          <div class="pts-chip chip-5"><div class="pts-num">{c5}</div><div class="pts-lbl">5-GRN</div></div>
+          <div class="pts-chip chip-4"><div class="pts-num">{c4}</div><div class="pts-lbl">4-BLU</div></div>
+          <div class="pts-chip chip-3"><div class="pts-num">{c3}</div><div class="pts-lbl">3-YLW</div></div>
+          <div class="pts-chip chip-2"><div class="pts-num">{c2}</div><div class="pts-lbl">2-ORG</div></div>
+          <div class="pts-chip chip-1"><div class="pts-num">{c1}</div><div class="pts-lbl">1-RED</div></div>
         </div>
       </div>
     </div>"""
@@ -333,10 +338,13 @@ CSS = """
 :root{
   --ink:#0f0f0f;--ink2:#444;--ink3:#888;--border:#e0e0e0;--border2:#f0f0f0;
   --bg:#fafaf8;--white:#ffffff;
-  --grn:#05764a;--grn-bg:#e6f7ef;--grn-border:#b3e6ce;
+  --grn5:#05764a;--grn5-bg:#d1fae5;--grn5-border:#6ee7b7;
+  --blu4:#0e7490;--blu4-bg:#e0f2fe;--blu4-border:#7dd3fc;
   --ylw:#a86400;--ylw-bg:#fef9e6;--ylw-border:#f5d98c;
+  --org:#c2410c;--org-bg:#fff7ed;--org-border:#fdba74;
   --red:#c0111a;--red-bg:#fdf0f0;--red-border:#f0b0b3;
   --pur:#5b21b6;--pur-bg:#ede9fe;--pur-border:#c4b5fd;
+  --grn:#05764a;--grn-bg:#e6f7ef;--grn-border:#b3e6ce;
 }
 body{font-family:'IBM Plex Sans',sans-serif;background:var(--bg);color:var(--ink);min-height:100vh;padding:2.5rem 1.5rem 4rem}
 .page{max-width:980px;margin:0 auto}
@@ -350,11 +358,11 @@ h1{font-size:22px;font-weight:600;line-height:1.2}
 .legend{display:flex;gap:20px;margin-bottom:1.5rem;flex-wrap:wrap;font-size:12px;color:var(--ink2)}
 .legend-item{display:flex;align-items:center;gap:6px}
 .leg-dot{width:8px;height:8px;border-radius:2px;display:inline-block}
-.summary-row{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:1.75rem}
+.summary-row{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:1.75rem}
 .scard{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
 .scard-label{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);margin-bottom:5px}
 .scard-val{font-size:30px;font-weight:600;line-height:1}
-.scard-val.red{color:var(--red)}.scard-val.grn{color:var(--grn)}.scard-val.ylw{color:var(--ylw)}
+.scard-val.c5{color:var(--grn5)}.scard-val.c4{color:var(--blu4)}.scard-val.c3{color:var(--ylw)}.scard-val.c2{color:var(--org)}.scard-val.c1{color:var(--red)}
 .section-title{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink3);margin-bottom:.75rem;margin-top:2rem}
 .table-wrap{background:var(--white);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:1.5rem}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -368,12 +376,16 @@ td.r{text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12px}
 td.rep-name{font-weight:500}
 td.reason{font-size:11px;color:var(--ink3)}
 td.approvals{text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--pur);font-weight:500}
-tr.row-grn td:first-child{border-left:3px solid var(--grn)}
-tr.row-ylw td:first-child{border-left:3px solid #f5b800}
-tr.row-red td:first-child{border-left:3px solid var(--red)}
+tr.row-5 td:first-child{border-left:3px solid var(--grn5)}
+tr.row-4 td:first-child{border-left:3px solid var(--blu4)}
+tr.row-3 td:first-child{border-left:3px solid #f5b800}
+tr.row-2 td:first-child{border-left:3px solid var(--org)}
+tr.row-1 td:first-child{border-left:3px solid var(--red)}
 .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:500;white-space:nowrap}
-.badge-grn{background:var(--grn-bg);color:var(--grn);border:1px solid var(--grn-border)}
+.badge-grn5{background:var(--grn5-bg);color:var(--grn5);border:1px solid var(--grn5-border)}
+.badge-blu4{background:var(--blu4-bg);color:var(--blu4);border:1px solid var(--blu4-border)}
 .badge-ylw{background:var(--ylw-bg);color:var(--ylw);border:1px solid var(--ylw-border)}
+.badge-org{background:var(--org-bg);color:var(--org);border:1px solid var(--org-border)}
 .badge-red{background:var(--red-bg);color:var(--red);border:1px solid var(--red-border)}
 .callout-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.5rem}
 .callout-box{border-radius:10px;overflow:hidden;border:1px solid}
@@ -400,13 +412,15 @@ tr.row-red td:first-child{border-left:3px solid var(--red)}
 .metric-goal{font-size:10px;color:var(--ink3);font-family:'IBM Plex Mono',monospace}
 .progress-bar-wrap{margin-top:4px;height:5px;background:var(--border2);border-radius:3px;width:120px}
 .progress-bar-fill{height:100%;border-radius:3px;background:#f5b800}
-.pts-dist{display:flex;gap:6px;margin-top:12px;padding-top:12px;border-top:1px solid var(--border2)}
-.pts-chip{flex:1;text-align:center;border-radius:6px;padding:8px 4px}
-.pts-chip .pts-num{font-size:18px;font-weight:600}
-.pts-chip .pts-lbl{font-size:10px;font-family:'IBM Plex Mono',monospace;text-transform:uppercase;letter-spacing:.06em;margin-top:2px}
-.grn-chip{background:var(--grn-bg);color:var(--grn)}
-.ylw-chip{background:var(--ylw-bg);color:var(--ylw)}
-.red-chip{background:var(--red-bg);color:var(--red)}
+.pts-dist{display:flex;gap:4px;margin-top:12px;padding-top:12px;border-top:1px solid var(--border2)}
+.pts-chip{flex:1;text-align:center;border-radius:6px;padding:6px 2px}
+.pts-chip .pts-num{font-size:16px;font-weight:600}
+.pts-chip .pts-lbl{font-size:9px;font-family:'IBM Plex Mono',monospace;text-transform:uppercase;letter-spacing:.06em;margin-top:2px}
+.chip-5{background:var(--grn5-bg);color:var(--grn5)}
+.chip-4{background:var(--blu4-bg);color:var(--blu4)}
+.chip-3{background:var(--ylw-bg);color:var(--ylw)}
+.chip-2{background:var(--org-bg);color:var(--org)}
+.chip-1{background:var(--red-bg);color:var(--red)}
 .rolling-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.5rem}
 .rolling-card{background:var(--white);border:1px solid var(--border);border-radius:12px;overflow:hidden}
 .rolling-head{background:#f4f3ef;padding:10px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
@@ -461,9 +475,9 @@ def generate_inday_analysis(rows, fmt_day, d1):
 
     points = []
 
-    grn_rows = [r for r in rows if r["pts"] == 1]
-    ylw_rows = [r for r in rows if r["pts"] == 2]
-    red_rows = [r for r in rows if r["pts"] == 3]
+    grn_rows = [r for r in rows if r["pts"] >= 4]
+    ylw_rows = [r for r in rows if r["pts"] == 3]
+    red_rows = [r for r in rows if r["pts"] <= 2]
 
     # ── 1. WHAT'S GETTING REPS TO GREEN ─────────────────────────────────────
     if grn_rows:
@@ -630,9 +644,9 @@ def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
     sr = data["stokoe_rolling"]
 
     conlan_card = sup_card("Brandon Conlan", cs["n"], cs["avg_a"], cs["avg_ap"],
-                           cs["pct_goal"], cs["grn"], cs["ylw"], cs["red"], cs["tot_ap"], d1)
+                           cs["pct_goal"], cs["c5"], cs["c4"], cs["c3"], cs["c2"], cs["c1"], cs["tot_ap"], d1)
     stokoe_card = sup_card("George Stokoe",  ss["n"], ss["avg_a"], ss["avg_ap"],
-                           ss["pct_goal"], ss["grn"], ss["ylw"], ss["red"], ss["tot_ap"], d1)
+                           ss["pct_goal"], ss["c5"], ss["c4"], ss["c3"], ss["c2"], ss["c1"], ss["tot_ap"], d1)
     conlan_roll = rolling_card("Brandon Conlan", "Team Rolling",
                                cr["n_days"], cr["n_reps"], cr["avg_a"], cr["pct_goal"], cr["top3"], cr["bot3"])
     stokoe_roll = rolling_card("George Stokoe",  "Team Rolling",
@@ -676,9 +690,11 @@ def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
     <div class="legend-item"><span class="leg-dot" style="background:var(--pur)"></span>Approvals &mdash; informational, does not affect PTS</div>
   </div>
   <div class="summary-row">
-    <div class="scard"><div class="scard-label">1-GRN performers</div><div class="scard-val grn">{grn_count}</div></div>
-    <div class="scard"><div class="scard-label">2-YLW middle tier</div><div class="scard-val ylw">{ylw_count}</div></div>
-    <div class="scard"><div class="scard-label">3-RED flagged</div><div class="scard-val red">{red_count}</div></div>
+    <div class="scard"><div class="scard-label">5-GRN (best)</div><div class="scard-val c5">{cnt5}</div></div>
+    <div class="scard"><div class="scard-label">4-BLU</div><div class="scard-val c4">{cnt4}</div></div>
+    <div class="scard"><div class="scard-label">3-YLW</div><div class="scard-val c3">{cnt3}</div></div>
+    <div class="scard"><div class="scard-label">2-ORG</div><div class="scard-val c2">{cnt2}</div></div>
+    <div class="scard"><div class="scard-label">1-RED (worst)</div><div class="scard-val c1">{cnt1}</div></div>
   </div>
   <div class="section-title">Rep scorecard &mdash; today, {d1_fmt}</div>
   <div class="table-wrap"><table>
@@ -705,11 +721,11 @@ def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
   </table></div>
   <div class="callout-grid">
     <div class="callout-box red-box">
-      <div class="callout-head">&#9888; Flagged for leadflow review &mdash; {red_count} reps</div>
+      <div class="callout-head">&#9888; Flagged (1-RED only) &mdash; {cnt1} reps</div>
       {flagged}
     </div>
     <div class="callout-box grn-box">
-      <div class="callout-head">&#10003; 1-GRN performers &mdash; {grn_count} reps</div>
+      <div class="callout-head">&#10003; Top performers (4-BLU &amp; 5-GRN) &mdash; {cnt4plus} reps</div>
       {greens}
     </div>
   </div>
@@ -768,9 +784,11 @@ def main():
         n   = len(tr)
         return {
             "n":        n,
-            "grn":      sum(r["pts"] == 1 for r in tr),
-            "ylw":      sum(r["pts"] == 2 for r in tr),
-            "red":      sum(r["pts"] == 3 for r in tr),
+            "c5":       sum(r["pts"] == 5 for r in tr),
+            "c4":       sum(r["pts"] == 4 for r in tr),
+            "c3":       sum(r["pts"] == 3 for r in tr),
+            "c2":       sum(r["pts"] == 2 for r in tr),
+            "c1":       sum(r["pts"] == 1 for r in tr),
             "avg_a":    sum(r["adl"] for r in tr) / n,
             "avg_ap":   sum(r["apd"] for r in tr) / n,
             "pct_goal": sum(r["adl"] >= 3 for r in tr) / n * 100,
@@ -794,9 +812,11 @@ def main():
             "avg_a":    sum(r["adl"] for r in tr)/n if n else 0,
             "avg_ap":   sum(r["apd"] for r in tr)/n if n else 0,
             "pct_goal": sum(r["adl"]>=3 for r in tr)/n*100 if n else 0,
-            "grn": sum(r["pts"]==1 for r in tr),
-            "ylw": sum(r["pts"]==2 for r in tr),
-            "red": sum(r["pts"]==3 for r in tr),
+            "c5": sum(r["pts"]==5 for r in tr),
+            "c4": sum(r["pts"]==4 for r in tr),
+            "c3": sum(r["pts"]==3 for r in tr),
+            "c2": sum(r["pts"]==2 for r in tr),
+            "c1": sum(r["pts"]==1 for r in tr),
         }
     team_stats_cur = {"conlan": _tstats_inday(CONLAN), "stokoe": _tstats_inday(STOKOE)}
     analysis_html = generate_analysis(
@@ -805,7 +825,7 @@ def main():
         d1=d1, d2=d1,
         rolling_c=data["conlan_rolling"], rolling_s=data["stokoe_rolling"],
         fmt_day=fmt_day, REP_LAST_TO_FULL=REP_LAST_TO_FULL,
-        CONLAN=CONLAN, STOKOE=STOKOE, scoring_system="1-3"
+        CONLAN=CONLAN, STOKOE=STOKOE, scoring_system="1-5"
     )
     inday_analysis_html = generate_inday_analysis(rows, fmt_day, d1)
     html = generate_html(d1, data, analysis_html=analysis_html, inday_analysis_html=inday_analysis_html)

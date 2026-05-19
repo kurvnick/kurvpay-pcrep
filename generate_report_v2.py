@@ -184,8 +184,8 @@ def now_pt_str():
         else datetime.now(_PT).strftime("%b %d, %Y %I:%M %p PT").replace(" 0", " ")
 
 def badge(pts):
-    colors = {5:"grn5", 4:"grn4", 3:"ylw", 2:"org", 1:"red"}
-    labels = {5:"5-GRN", 4:"4-GRN", 3:"3-YLW", 2:"2-ORG", 1:"1-RED"}
+    colors = {5:"grn5", 4:"blu4", 3:"ylw", 2:"org", 1:"red"}
+    labels = {5:"5-GRN", 4:"4-BLU", 3:"3-YLW", 2:"2-ORG", 1:"1-RED"}
     return f'<span class="badge badge-{colors[pts]}">{labels[pts]}</span>'
 
 def row_cls(pts):
@@ -240,7 +240,7 @@ CSS = """
   --ink:#0f0f0f;--ink2:#444;--ink3:#888;--border:#e0e0e0;--border2:#f0f0f0;
   --bg:#fafaf8;--white:#ffffff;
   --grn5:#05764a;--grn5-bg:#d1fae5;--grn5-border:#6ee7b7;
-  --grn4:#0e7490;--grn4-bg:#e0f2fe;--grn4-border:#7dd3fc;
+  --blu4:#0e7490;--blu4-bg:#e0f2fe;--blu4-border:#7dd3fc;
   --ylw:#a86400;--ylw-bg:#fef9e6;--ylw-border:#f5d98c;
   --org:#c2410c;--org-bg:#fff7ed;--org-border:#fdba74;
   --red:#c0111a;--red-bg:#fdf0f0;--red-border:#f0b0b3;
@@ -260,7 +260,7 @@ h1{font-size:22px;font-weight:600;line-height:1.2}
 .scard{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:12px 14px}
 .scard-label{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin-bottom:5px}
 .scard-val{font-size:26px;font-weight:600;line-height:1}
-.scard-val.c5{color:var(--grn5)}.scard-val.c4{color:var(--grn4)}.scard-val.c3{color:var(--ylw)}.scard-val.c2{color:var(--org)}.scard-val.c1{color:var(--red)}
+.scard-val.c5{color:var(--grn5)}.scard-val.c4{color:var(--blu4)}.scard-val.c3{color:var(--ylw)}.scard-val.c2{color:var(--org)}.scard-val.c1{color:var(--red)}
 .section-title{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink3);margin-bottom:.75rem;margin-top:2rem}
 .table-wrap{background:var(--white);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:1.5rem}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -275,13 +275,13 @@ td.rep-name{font-weight:500}
 td.reason{font-size:11px;color:var(--ink3)}
 td.apprvs{text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--pur);font-weight:500}
 tr.row-5 td:first-child{border-left:3px solid var(--grn5)}
-tr.row-4 td:first-child{border-left:3px solid var(--grn4)}
+tr.row-4 td:first-child{border-left:3px solid var(--blu4)}
 tr.row-3 td:first-child{border-left:3px solid #f5b800}
 tr.row-2 td:first-child{border-left:3px solid var(--org)}
 tr.row-1 td:first-child{border-left:3px solid var(--red)}
 .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:500;white-space:nowrap}
 .badge-grn5{background:var(--grn5-bg);color:var(--grn5);border:1px solid var(--grn5-border)}
-.badge-grn4{background:var(--grn4-bg);color:var(--grn4);border:1px solid var(--grn4-border)}
+.badge-blu4{background:var(--blu4-bg);color:var(--blu4);border:1px solid var(--blu4-border)}
 .badge-ylw{background:var(--ylw-bg);color:var(--ylw);border:1px solid var(--ylw-border)}
 .badge-org{background:var(--org-bg);color:var(--org);border:1px solid var(--org-border)}
 .badge-red{background:var(--red-bg);color:var(--red);border:1px solid var(--red-border)}
@@ -315,7 +315,7 @@ tr.row-1 td:first-child{border-left:3px solid var(--red)}
 .pts-chip .pts-num{font-size:16px;font-weight:600}
 .pts-chip .pts-lbl{font-size:9px;font-family:'IBM Plex Mono',monospace;text-transform:uppercase;letter-spacing:.06em;margin-top:2px}
 .chip-5{background:var(--grn5-bg);color:var(--grn5)}
-.chip-4{background:var(--grn4-bg);color:var(--grn4)}
+.chip-blu4{background:var(--blu4-bg);color:var(--blu4)}
 .chip-3{background:var(--ylw-bg);color:var(--ylw)}
 .chip-2{background:var(--org-bg);color:var(--org)}
 .chip-1{background:var(--red-bg);color:var(--red)}
@@ -369,7 +369,7 @@ def sup_card(name, team_size, avg_a, avg_ap, pct_goal, c5, c4, c3, c2, c1, tot_a
         </div>
         <div class="pts-dist">
           <div class="pts-chip chip-5"><div class="pts-num">{c5}</div><div class="pts-lbl">5-GRN</div></div>
-          <div class="pts-chip chip-4"><div class="pts-num">{c4}</div><div class="pts-lbl">4-GRN</div></div>
+          <div class="pts-chip chip-blu4"><div class="pts-num">{c4}</div><div class="pts-lbl">4-BLU</div></div>
           <div class="pts-chip chip-3"><div class="pts-num">{c3}</div><div class="pts-lbl">3-YLW</div></div>
           <div class="pts-chip chip-2"><div class="pts-num">{c2}</div><div class="pts-lbl">2-ORG</div></div>
           <div class="pts-chip chip-1"><div class="pts-num">{c1}</div><div class="pts-lbl">1-RED</div></div>
@@ -508,7 +508,7 @@ def generate_html(d1, d2, acct_days, data, analysis_html=""):
 
   <div class="legend">
     <div class="legend-item"><span class="leg-dot" style="background:var(--grn5)"></span>5-GRN &mdash; accts &ge;3 or (150+ calls &amp; 2+ accts)</div>
-    <div class="legend-item"><span class="leg-dot" style="background:var(--grn4)"></span>4-GRN &mdash; calls &ge;150 or accts &ge;2</div>
+    <div class="legend-item"><span class="leg-dot" style="background:var(--blu4)"></span>4-BLU &mdash; calls &ge;150 or accts &ge;2</div>
     <div class="legend-item"><span class="leg-dot" style="background:#f5b800"></span>3-YLW &mdash; 2 of: 100+ calls / 60+ min / 1+ acct</div>
     <div class="legend-item"><span class="leg-dot" style="background:var(--org)"></span>2-ORG &mdash; 2 of: 50+ calls / 30+ min / 1+ acct</div>
     <div class="legend-item"><span class="leg-dot" style="background:var(--red)"></span>1-RED &mdash; below all thresholds</div>
@@ -517,7 +517,7 @@ def generate_html(d1, d2, acct_days, data, analysis_html=""):
 
   <div class="summary-row">
     <div class="scard"><div class="scard-label">5-GRN (best)</div><div class="scard-val c5">{cnt[5]}</div></div>
-    <div class="scard"><div class="scard-label">4-GRN</div><div class="scard-val c4">{cnt[4]}</div></div>
+    <div class="scard"><div class="scard-label">4-BLU</div><div class="scard-val c4">{cnt[4]}</div></div>
     <div class="scard"><div class="scard-label">3-YLW</div><div class="scard-val c3">{cnt[3]}</div></div>
     <div class="scard"><div class="scard-label">2-ORG</div><div class="scard-val c2">{cnt[2]}</div></div>
     <div class="scard"><div class="scard-label">1-RED (worst)</div><div class="scard-val c1">{cnt[1]}</div></div>
@@ -555,7 +555,7 @@ def generate_html(d1, d2, acct_days, data, analysis_html=""):
       {flagged}
     </div>
     <div class="callout-box grn-box">
-      <div class="callout-head">&#10003; Top performers (4-GRN &amp; 5-GRN) &mdash; {cnt[4]+cnt[5]} reps</div>
+      <div class="callout-head">&#10003; Top performers (4-BLU &amp; 5-GRN) &mdash; {cnt[4]+cnt[5]} reps</div>
       {greens}
     </div>
   </div>

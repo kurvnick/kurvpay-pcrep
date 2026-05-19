@@ -5,6 +5,7 @@ Run every 30 min during business hours via GitHub Actions
 """
 
 import os, sys, io, zipfile, requests
+from report_analysis import generate_analysis
 from datetime import date, timedelta, datetime, timezone
 from collections import defaultdict
 
@@ -185,6 +186,11 @@ def fmt_day(d):
     if sys.platform == "win32":
         return dt.strftime("%a %b %d").replace(" 0", " ")
     return dt.strftime("%a %b %-d")
+
+def now_pt_str():
+    """Return current Pacific time as a readable string."""
+    return datetime.now(_PT).strftime("%b %-d, %Y %-I:%M %p PT") if sys.platform != "win32" \
+        else datetime.now(_PT).strftime("%b %d, %Y %I:%M %p PT").replace(" 0", " ")
 
 def badge(pts):
     cls   = {1:"grn", 2:"ylw", 3:"red"}[pts]
@@ -417,7 +423,7 @@ tr.row-red td:first-child{border-left:3px solid var(--red)}
 """
 
 # ── HTML GENERATION ───────────────────────────────────────────────────────────
-def generate_html(d1, data):
+def generate_html(d1, data, analysis_html=""):
     rows      = data["rows"]
     grn_count = sum(1 for r in rows if r["pts"] == 1)
     ylw_count = sum(1 for r in rows if r["pts"] == 2)
@@ -427,7 +433,8 @@ def generate_html(d1, data):
     org_avg_d  = sum(r["ad"]  for r in rows) / n
     org_avg_a  = sum(r["adl"] for r in rows) / n
     org_tot_ap = data["org_tot_ap"]
-    d1_fmt     = fmt_day(d1)
+    d1_fmt = fmt_day(d1)
+    now_pt = now_pt_str()
     now_str    = date.today().strftime("%B %d, %Y").replace(" 0", " ")
 
     table_rows = ""
@@ -546,8 +553,11 @@ def generate_html(d1, data):
   <div class="sup-grid">{conlan_card}{stokoe_card}</div>
   <div class="section-title">Rolling data &mdash; {cr['window_label']}</div>
   <div class="rolling-grid">{conlan_roll}{stokoe_roll}</div>
+  <div class="section-title">Analysis &amp; talking points</div>
+  {analysis_html}
+
   <div class="footer">
-    <span>Source: Zoho CRM &middot; Accounts + Submissions modules &middot; auto-generated</span>
+    <span>Source: Zoho CRM &middot; Accounts + Submissions modules &middot; auto-generated &middot; <strong>Updated: {now_pt}</strong></span>
     <span>Today: {d1_fmt} &middot; Rolling: {cr['window_label']}</span>
   </div>
 </div>
@@ -610,7 +620,27 @@ def main():
     }
 
     print("Generating HTML...")
-    html = generate_html(d1, data)
+    def _tstats_inday(team_set):
+        tr = [r for r in rows if r["last"] in team_set]
+        n  = len(tr)
+        return {
+            "avg_a":    sum(r["adl"] for r in tr)/n if n else 0,
+            "avg_ap":   sum(r["apd"] for r in tr)/n if n else 0,
+            "pct_goal": sum(r["adl"]>=3 for r in tr)/n*100 if n else 0,
+            "grn": sum(r["pts"]==1 for r in tr),
+            "ylw": sum(r["pts"]==2 for r in tr),
+            "red": sum(r["pts"]==3 for r in tr),
+        }
+    team_stats_cur = {"conlan": _tstats_inday(CONLAN), "stokoe": _tstats_inday(STOKOE)}
+    analysis_html = generate_analysis(
+        rows=rows, prev_rows=None,
+        team_stats_cur=team_stats_cur, team_stats_prev=None,
+        d1=d1, d2=d1,
+        rolling_c=data["conlan_rolling"], rolling_s=data["stokoe_rolling"],
+        fmt_day=fmt_day, REP_LAST_TO_FULL=REP_LAST_TO_FULL,
+        CONLAN=CONLAN, STOKOE=STOKOE, scoring_system="1-3"
+    )
+    html = generate_html(d1, data, analysis_html=analysis_html)
 
     with open("inday_report.html", "w", encoding="utf-8") as f:
         f.write(html)

@@ -687,10 +687,12 @@ def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
     <div class="goal-chip"><span class="label">Daily goal:</span> 120 min talk time</div>
   </div>
   <div class="legend">
-    <div class="legend-item"><span class="leg-dot" style="background:var(--grn)"></span>1-GRN &mdash; accounts &ge;3 OR calls &gt;124 OR dur &gt;119 min</div>
-    <div class="legend-item"><span class="leg-dot" style="background:#f5b800"></span>2-YLW &mdash; accounts &ge;2 or activity threshold met</div>
-    <div class="legend-item"><span class="leg-dot" style="background:var(--red)"></span>3-RED &mdash; below all thresholds</div>
-    <div class="legend-item"><span class="leg-dot" style="background:var(--pur)"></span>Approvals &mdash; informational, does not affect PTS</div>
+    <div class="legend-item"><span class="leg-dot" style="background:var(--grn5)"></span>5-GRN &mdash; accts &ge;3 or (150+ calls &amp; 2+ accts)</div>
+    <div class="legend-item"><span class="leg-dot" style="background:var(--blu4)"></span>4-BLU &mdash; calls &ge;150 or accts &ge;2</div>
+    <div class="legend-item"><span class="leg-dot" style="background:#f5b800"></span>3-YLW &mdash; 2 of: 100+ calls / 60+ min / 1+ acct</div>
+    <div class="legend-item"><span class="leg-dot" style="background:var(--org)"></span>2-ORG &mdash; 2 of: 50+ calls / 30+ min / 1+ acct</div>
+    <div class="legend-item"><span class="leg-dot" style="background:var(--red)"></span>1-RED &mdash; below all thresholds</div>
+    <div class="legend-item"><span class="leg-dot" style="background:var(--pur)"></span>Approvals &mdash; informational</div>
   </div>
   <div class="summary-row">
     <div class="scard"><div class="scard-label">5-GRN (best)</div><div class="scard-val c5">{cnt5}</div></div>

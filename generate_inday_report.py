@@ -477,7 +477,7 @@ def generate_inday_analysis(rows, fmt_day, d1):
 
     grn_rows = [r for r in rows if r["pts"] >= 4]
     ylw_rows = [r for r in rows if r["pts"] == 3]
-    red_rows = [r for r in rows if r["pts"] <= 2]
+    red_rows = [r for r in rows if r["pts"] == 1]
 
     # ── 1. WHAT'S GETTING REPS TO GREEN ─────────────────────────────────────
     if grn_rows:

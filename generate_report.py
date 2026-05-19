@@ -305,6 +305,12 @@ def fmt_day(d):
     return dt.strftime("%a %b %-d").replace(" 0"," ") if sys.platform != "win32" \
         else dt.strftime("%a %b %d").lstrip("0")
 
+def now_pt_str():
+    """Return current Pacific time as a readable string."""
+    if sys.platform == "win32":
+        return datetime.now(_PT).strftime("%b %d, %Y %I:%M %p PT").replace(" 0", " ")
+    return datetime.now(_PT).strftime("%b %-d, %Y %-I:%M %p PT")
+
 def sup_card(name, team_size, avg_a, avg_ap, pct_goal, grn, ylw, red, tot_ap_d1, tot_ap_d2, d1, d2):
     bar_w = min(100, int(avg_a / 3 * 100))
     return f"""

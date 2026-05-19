@@ -597,6 +597,59 @@ def generate_inday_analysis(rows, fmt_day, d1):
     )
 
 
+
+def generate_hourly_chart(hourly_counts, d1_fmt):
+    hours  = list(range(6, 19))
+    counts = [hourly_counts.get(h, 0) for h in hours]
+    max_c  = max(counts) if max(counts) > 0 else 1
+    W, H   = 900, 170
+    pl, pr, pt, pb = 36, 16, 18, 36
+    cw = W - pl - pr
+    ch = H - pt - pb
+    bw = (cw - 4 * (len(hours) - 1)) // len(hours)
+    lbl_map = {6:"6am",7:"7am",8:"8am",9:"9am",10:"10am",11:"11am",
+               12:"12pm",13:"1pm",14:"2pm",15:"3pm",16:"4pm",17:"5pm",18:"6pm"}
+    parts = []
+    for pct in [0.25, 0.5, 0.75, 1.0]:
+        gy = pt + ch - int(pct * ch)
+        gv = int(pct * max_c)
+        parts.append("<line x1=\"" + str(pl) + "\" y1=\"" + str(gy) + "\" x2=\"" + str(W-pr) + "\" y2=\"" + str(gy) + "\" stroke=\"#f3f4f6\" stroke-width=\"1\"/>")
+        parts.append("<text x=\"" + str(pl-4) + "\" y=\"" + str(gy+3) + "\" text-anchor=\"end\" font-size=\"8\" fill=\"#9ca3af\">" + str(gv) + "</text>")
+    for i, (h, c) in enumerate(zip(hours, counts)):
+        x  = pl + i * (bw + 4)
+        bh = max(2, int((c / max_c) * ch))
+        y  = pt + ch - bh
+        fill = "#e5e7eb"
+        if c > 0:
+            if c >= max_c * 0.8:   fill = "#05764a"
+            elif c >= max_c * 0.5: fill = "#0e7490"
+            elif c >= max_c * 0.25:fill = "#f59e0b"
+            else:                   fill = "#d1d5db"
+        parts.append("<rect x=\"" + str(x) + "\" y=\"" + str(y) + "\" width=\"" + str(bw) + "\" height=\"" + str(bh) + "\" fill=\"" + fill + "\" rx=\"2\"/>")
+        if c > 0:
+            parts.append("<text x=\"" + str(x+bw//2) + "\" y=\"" + str(y-3) + "\" text-anchor=\"middle\" font-size=\"9\" fill=\"#6b7280\">" + str(c) + "</text>")
+        lb = lbl_map.get(h, str(h))
+        parts.append("<text x=\"" + str(x+bw//2) + "\" y=\"" + str(pt+ch+16) + "\" text-anchor=\"middle\" font-size=\"9\" fill=\"#9ca3af\">" + lb + "</text>")
+    total = sum(counts)
+    ph    = hours[counts.index(max(counts))] if max(counts) > 0 else None
+    plbl  = lbl_map.get(ph, "N/A") if ph else "N/A"
+    inner = " ".join(parts)
+    mono  = "IBM Plex Mono,monospace"
+    html  = (
+        "<div style=\"background:var(--white);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:1.5rem\">"
+        "<div style=\"display:flex;justify-content:space-between;align-items:center;margin-bottom:10px\">"
+        "<div style=\"font-family:" + mono + ";font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--ink3)\">Call volume by hour &mdash; " + d1_fmt + "</div>"
+        "<div style=\"display:flex;gap:16px;font-family:" + mono + ";font-size:11px;color:var(--ink3)\">"
+        "<span>Total: <strong style=\"color:var(--ink)\">" + str(total) + "</strong></span> "
+        "<span>Peak: <strong style=\"color:var(--ink)\">" + plbl + " (" + str(max(counts)) + ")</strong></span>"
+        "</div></div>"
+        "<svg viewBox=\"0 0 " + str(W) + " " + str(H) + "\" xmlns=\"http://www.w3.org/2000/svg\" style=\"width:100%;height:auto\">"
+        + inner +
+        "</svg></div>"
+    )
+    return html
+
+
 def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
     rows      = data["rows"]
     n         = len(rows)
@@ -612,6 +665,7 @@ def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
     org_tot_ap = data["org_tot_ap"]
     d1_fmt = fmt_day(d1)
     now_pt = now_pt_str()
+    chart_html = generate_hourly_chart(data.get("hourly_counts", {}), d1_fmt)
     now_str    = date.today().strftime("%B %d, %Y").replace(" 0", " ")
 
     table_rows = ""
@@ -681,6 +735,7 @@ def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
     <span style="color:var(--ink3);text-transform:uppercase;letter-spacing:.08em;font-size:10px">Last updated</span>
     <span style="font-weight:600;color:var(--ink)">{now_pt}</span>
   </div>
+  {chart_html}
   <div class="goals-bar">
     <div class="goal-chip"><span class="label">Daily goal:</span> 3 new accounts</div>
     <div class="goal-chip"><span class="label">Daily goal:</span> 125 calls</div>
@@ -761,7 +816,7 @@ def main():
     print(f"Report date: {d1} (today, Pacific time)")
 
     print("Pulling calls...")
-    calls = pull_calls(token, d1)
+    calls, hourly_counts = pull_calls(token, d1)
 
     print("Pulling accounts...")
     accts = pull_accounts(token, d1)
@@ -807,6 +862,7 @@ def main():
         "conlan_rolling": conlan_rolling,
         "stokoe_rolling": stokoe_rolling,
         "org_tot_ap":     sum(apprvs.values()),
+        "hourly_counts":  hourly_counts,
     }
 
     print("Generating HTML...")

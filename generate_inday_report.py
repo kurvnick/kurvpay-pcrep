@@ -423,7 +423,167 @@ tr.row-red td:first-child{border-left:3px solid var(--red)}
 """
 
 # ── HTML GENERATION ───────────────────────────────────────────────────────────
-def generate_html(d1, data, analysis_html=""):
+def generate_inday_analysis(rows, fmt_day, d1):
+    """Generate action-oriented in-day analysis focused on path to green."""
+
+    d1_fmt = fmt_day(d1)
+    n = len(rows)
+
+    def pill(val, color="default"):
+        STYLES = {
+            "green":  "background:#e6f7ef;color:#05764a",
+            "red":    "background:#fdf0f0;color:#c0111a",
+            "yellow": "background:#fef9e6;color:#a86400",
+            "purple": "background:#ede9fe;color:#5b21b6",
+            "blue":   "background:#e0f2fe;color:#0e7490",
+            "default":"background:#f0f0f0;color:#444",
+        }
+        st = STYLES.get(color, STYLES["default"])
+        return (f'<span style="display:inline-block;font-family:\'IBM Plex Mono\',monospace;'
+                f'font-size:11px;border-radius:4px;padding:1px 7px;margin:0 2px;{st}">{val}</span>')
+
+    def tp(label, headline, body, lc="trend"):
+        LABEL_COLORS = {
+            "trend":    "color:#888",
+            "concern":  "color:#c0111a",
+            "positive": "color:#05764a",
+            "action":   "color:#0e7490",
+        }
+        lcolor = LABEL_COLORS.get(lc, "#888")
+        return (
+            f'<div style="margin-bottom:20px;padding-bottom:20px;border-bottom:.5px solid #f0f0f0">'
+            f'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:10px;text-transform:uppercase;'
+            f'letter-spacing:.1em;{lcolor};margin-bottom:5px">{label}</div>'
+            f'<div style="font-size:14px;font-weight:600;margin-bottom:6px;line-height:1.3;color:#0f0f0f">{headline}</div>'
+            f'<div style="font-size:13px;color:#444;line-height:1.7">{body}</div>'
+            f'</div>'
+        )
+
+    points = []
+
+    grn_rows = [r for r in rows if r["pts"] == 1]
+    ylw_rows = [r for r in rows if r["pts"] == 2]
+    red_rows = [r for r in rows if r["pts"] == 3]
+
+    # ── 1. WHAT'S GETTING REPS TO GREEN ─────────────────────────────────────
+    if grn_rows:
+        reason_counts = {}
+        for r in grn_rows:
+            reason_counts[r["reason"]] = reason_counts.get(r["reason"], 0) + 1
+        top_reason = max(reason_counts, key=reason_counts.get)
+        # Parse reason into plain english
+        reason_map = {
+            "accounts &ge; 3": "hitting 3+ accounts",
+            "calls &gt; 124":  "hitting 125+ calls",
+            "duration &gt; 119 min": "hitting 120+ min of talk time",
+        }
+        top_reason_plain = reason_map.get(top_reason, top_reason)
+
+        grn_body = f"<strong>{len(grn_rows)} of {n} reps ({len(grn_rows)*100//n}%) are green today.</strong> "
+        grn_body += f"The most common path: {pill(top_reason_plain, 'green')} ({reason_counts[top_reason]} reps).<br><br>"
+        grn_body += "<strong>Green reps today:</strong><br>"
+        for r in sorted(grn_rows, key=lambda x: -x["adl"]):
+            p_a = pill(f"{r['adl']:.0f} accts", "green")
+            p_c = pill(f"{r['ac']:.0f} calls")
+            p_d = pill(f"{r['ad']:.0f} min")
+            p_r = pill(r['reason'], "blue")
+            grn_body += f"&bull; <strong>{r['name']}</strong>: {p_a} {p_c} {p_d} {p_r}<br>"
+        points.append(tp("What's working", f"{top_reason_plain.capitalize()} is the top path to green today", grn_body, "positive"))
+    else:
+        points.append(tp("What's working", "No reps at 1-GRN yet today", "The day is still early. First rep to 3 accounts, 125 calls, or 120 min talk time hits green.", "trend"))
+
+    # ── 2. CLOSEST TO GREEN (yellow reps) ────────────────────────────────────
+    if ylw_rows:
+        # Score each yellow rep on how close they are to each green threshold
+        closest = []
+        for r in ylw_rows:
+            gaps = []
+            if r["adl"] < 3:
+                gaps.append(("accounts", 3 - r["adl"], f"{3 - r['adl']:.0f} more account{'s' if 3-r['adl'] != 1 else ''}"))
+            if r["ac"] < 125:
+                gaps.append(("calls", 125 - r["ac"], f"{125 - r['ac']:.0f} more calls"))
+            if r["ad"] < 120:
+                gaps.append(("duration", 120 - r["ad"], f"{120 - r['ad']:.0f} more min"))
+            if gaps:
+                best_gap = min(gaps, key=lambda x: x[1] / {"accounts": 3, "calls": 125, "duration": 120}[x[0]])
+                closest.append((r, best_gap))
+        closest.sort(key=lambda x: x[1][1] / {"accounts": 3, "calls": 125, "duration": 120}[x[1][0]])
+
+        close_body = f"<strong>{len(ylw_rows)} reps at 2-YLW</strong> — closest to flipping green:<br><br>"
+        for r, gap in closest[:6]:
+            metric, delta, gap_str = gap
+            color = "yellow" if delta > 1 else "green"
+            p_gap = pill(gap_str, color)
+            p_a = pill(f"{r['adl']:.0f}a")
+            p_c = pill(f"{r['ac']:.0f}c")
+            p_d = pill(f"{r['ad']:.0f}m")
+            close_body += f"&bull; <strong>{r['name']}</strong>: needs {p_gap} to go green &middot; currently {p_a} {p_c} {p_d}<br>"
+        points.append(tp("Closest to green", f"{len(ylw_rows)} reps one push away from 1-GRN", close_body, "action"))
+
+    # ── 3. FLAGGED REPS — WHAT THEY NEED ─────────────────────────────────────
+    if red_rows:
+        red_body = f"<strong>{len(red_rows)} reps at 3-RED.</strong> What each needs to escape:<br><br>"
+        for r in sorted(red_rows, key=lambda x: -(x["ac"] + x["adl"] * 10)):
+            activity_flag = ""
+            if r["ac"] == 0:
+                activity_flag = pill("no calls yet", "red")
+            elif r["ac"] < 20:
+                activity_flag = pill("very low activity", "red")
+            elif r["ac"] > 80 and r["adl"] == 0:
+                activity_flag = pill("high calls, no accounts", "yellow")
+            if r["adl"] >= 2:
+                best = "1 more account gets to 2-YLW"
+            elif r["ac"] >= 100:
+                best = f"{125 - r['ac']:.0f} more calls to green"
+            elif r["ad"] >= 90:
+                best = f"{120 - r['ad']:.0f} more min to green"
+            else:
+                best = "needs effort across all metrics"
+            p_a = pill(f"{r['adl']:.0f}a", "red")
+            p_c = pill(f"{r['ac']:.0f}c")
+            p_d = pill(f"{r['ad']:.0f}m")
+            p_b = pill(best, "blue")
+            sep = " " + activity_flag + " " if activity_flag else " "
+            red_body += f"&bull; <strong>{r['name']}</strong>: {p_a} {p_c} {p_d}{sep}&rarr; {p_b}<br>"
+        points.append(tp("Path out of red", f"{len(red_rows)} reps need a push — here's what it takes", red_body, "concern"))
+
+    # ── 4. EFFICIENCY CALLOUT ─────────────────────────────────────────────────
+    high_calls_no_accts = [r for r in rows if r["ac"] > 60 and r["adl"] == 0]
+    if high_calls_no_accts:
+        eff_body = "These reps have strong call volume today but haven't opened any accounts:<br><br>"
+        for r in sorted(high_calls_no_accts, key=lambda x: -x["ac"]):
+            p_c = pill(f"{r['ac']:.0f} calls", "yellow")
+            p_d = pill(f"{r['ad']:.0f} min")
+            p_z = pill("0 accounts", "red")
+            eff_body += f"&bull; <strong>{r['name']}</strong>: {p_c} {p_d} {p_z} &mdash; 1 account puts them at 2-YLW<br>"
+        points.append(tp("Efficiency watch", "High call volume, no accounts yet today", eff_body, "concern"))
+
+    # ── 5. APPROVALS TODAY ────────────────────────────────────────────────────
+    reps_with_ap = [r for r in rows if r["apd"] > 0]
+    total_ap = sum(r["apd"] for r in rows)
+    if reps_with_ap:
+        ap_body = f"<strong>{total_ap:.0f} total approvals today</strong> across {len(reps_with_ap)} reps.<br><br>"
+        for r in sorted(reps_with_ap, key=lambda x: -x["apd"]):
+            p_ap = pill(f"{r['apd']:.0f} apprvs", "purple")
+            p_a  = pill(f"{r['adl']:.0f} accts")
+            ap_body += f"&bull; <strong>{r['name']}</strong>: {p_ap} {p_a}<br>"
+        points.append(tp("Approvals today", f"{total_ap:.0f} approvals logged — {len(reps_with_ap)} reps contributing", ap_body, "positive"))
+
+    # Remove last divider
+    if points:
+        points[-1] = points[-1].replace("border-bottom:.5px solid #f0f0f0", "border-bottom:none")
+
+    return (
+        f'<div style="background:var(--white,#fff);border:1px solid var(--border,#e0e0e0);'
+        f'border-radius:12px;overflow:hidden;margin-bottom:1.5rem">'
+        f'<div style="background:#f4f3ef;padding:12px 16px;font-size:13px;font-weight:600;'
+        f'border-bottom:1px solid var(--border,#e0e0e0)">&#128200; In-day analysis &mdash; {d1_fmt}</div>'
+        f'<div style="padding:16px">{"".join(points)}</div>'
+        f'</div>'
+    )
+
+
+def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
     rows      = data["rows"]
     grn_count = sum(1 for r in rows if r["pts"] == 1)
     ylw_count = sum(1 for r in rows if r["pts"] == 2)
@@ -500,6 +660,10 @@ def generate_html(d1, data, analysis_html=""):
       Approvals: Approved / Conditionally Approved / Auto Approved
     </div>
   </div>
+  <div style="background:var(--white);border:1px solid var(--border);border-radius:8px;padding:10px 16px;margin-bottom:1.5rem;display:flex;align-items:center;justify-content:space-between;font-family:'IBM Plex Mono',monospace;font-size:12px">
+    <span style="color:var(--ink3);text-transform:uppercase;letter-spacing:.08em;font-size:10px">Last updated</span>
+    <span style="font-weight:600;color:var(--ink)">{now_pt}</span>
+  </div>
   <div class="goals-bar">
     <div class="goal-chip"><span class="label">Daily goal:</span> 3 new accounts</div>
     <div class="goal-chip"><span class="label">Daily goal:</span> 125 calls</div>
@@ -551,6 +715,9 @@ def generate_html(d1, data, analysis_html=""):
   </div>
   <div class="section-title">Supervisor team comparison &mdash; today, {d1_fmt}</div>
   <div class="sup-grid">{conlan_card}{stokoe_card}</div>
+  <div class="section-title">Analysis &amp; talking points</div>
+  {inday_analysis_html}
+
   <div class="section-title">Rolling data &mdash; {cr['window_label']}</div>
   <div class="rolling-grid">{conlan_roll}{stokoe_roll}</div>
   <div class="section-title">Analysis &amp; talking points</div>
@@ -640,7 +807,8 @@ def main():
         fmt_day=fmt_day, REP_LAST_TO_FULL=REP_LAST_TO_FULL,
         CONLAN=CONLAN, STOKOE=STOKOE, scoring_system="1-3"
     )
-    html = generate_html(d1, data, analysis_html=analysis_html)
+    inday_analysis_html = generate_inday_analysis(rows, fmt_day, d1)
+    html = generate_html(d1, data, analysis_html=analysis_html, inday_analysis_html=inday_analysis_html)
 
     with open("inday_report.html", "w", encoding="utf-8") as f:
         f.write(html)

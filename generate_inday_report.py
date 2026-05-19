@@ -599,10 +599,13 @@ def generate_inday_analysis(rows, fmt_day, d1):
 
 def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
     rows      = data["rows"]
-    grn_count = sum(1 for r in rows if r["pts"] == 1)
-    ylw_count = sum(1 for r in rows if r["pts"] == 2)
-    red_count = sum(1 for r in rows if r["pts"] == 3)
     n         = len(rows)
+    cnt5 = sum(1 for r in rows if r["pts"] == 5)
+    cnt4 = sum(1 for r in rows if r["pts"] == 4)
+    cnt3 = sum(1 for r in rows if r["pts"] == 3)
+    cnt2 = sum(1 for r in rows if r["pts"] == 2)
+    cnt1 = sum(1 for r in rows if r["pts"] == 1)
+    cnt4plus = cnt4 + cnt5
     org_avg_c  = sum(r["ac"]  for r in rows) / n
     org_avg_d  = sum(r["ad"]  for r in rows) / n
     org_avg_a  = sum(r["adl"] for r in rows) / n

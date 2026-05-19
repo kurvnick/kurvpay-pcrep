@@ -6,6 +6,7 @@ Run daily via GitHub Actions at 5am PT (12:00 UTC Mon-Fri)
 
 import os
 import sys
+from report_analysis import generate_analysis
 import json
 import requests
 from datetime import date, timedelta, datetime
@@ -386,7 +387,7 @@ def rolling_card(sup_name, team_label, n_days, n_reps, avg_a, pct_goal, top3, bo
       </div>
     </div>"""
 
-def generate_html(d1, d2, data):
+def generate_html(d1, d2, data, analysis_html=""):
     rows = data["rows"]
     grn_count = sum(1 for r in rows if r["pts"]==1)
     ylw_count = sum(1 for r in rows if r["pts"]==2)
@@ -457,6 +458,7 @@ def generate_html(d1, d2, data):
 
     d1_fmt = fmt_day(d1)
     d2_fmt = fmt_day(d2)
+    now_pt     = now_pt_str()
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -544,8 +546,11 @@ def generate_html(d1, d2, data):
   <div class="section-title">Rolling data &mdash; {cr['window_label']}</div>
   <div class="rolling-grid">{conlan_roll}{stokoe_roll}</div>
 
+  <div class="section-title">Analysis &amp; talking points</div>
+  {analysis_html}
+
   <div class="footer">
-    <span>Source: Zoho CRM &middot; Accounts + Submissions modules &middot; auto-generated</span>
+    <span>Source: Zoho CRM &middot; Accounts + Submissions modules &middot; auto-generated &middot; <strong>Updated: {now_pt}</strong></span>
     <span>{d1_fmt} &amp; {d2_fmt} &middot; Rolling: {cr['window_label']}</span>
   </div>
 
@@ -672,7 +677,28 @@ def main():
     }
 
     print("Generating HTML...")
-    html = generate_html(d1, d2, data)
+    # Build team_stats dicts for analysis
+    def _tstats_for_analysis(team_set):
+        tr = [r for r in rows if r["last"] in team_set]
+        n  = len(tr)
+        return {
+            "avg_a":    sum(r["adl"] for r in tr)/n if n else 0,
+            "avg_ap":   sum(r["apd"] for r in tr)/n if n else 0,
+            "pct_goal": sum(r["adl"]>=3 for r in tr)/n*100 if n else 0,
+            "grn": sum(r["pts"]==1 for r in tr),
+            "ylw": sum(r["pts"]==2 for r in tr),
+            "red": sum(r["pts"]==3 for r in tr),
+        }
+    team_stats_cur = {"conlan": _tstats_for_analysis(CONLAN), "stokoe": _tstats_for_analysis(STOKOE)}
+    analysis_html = generate_analysis(
+        rows=rows, prev_rows=None,
+        team_stats_cur=team_stats_cur, team_stats_prev=None,
+        d1=d1, d2=d2,
+        rolling_c=data["conlan_rolling"], rolling_s=data["stokoe_rolling"],
+        fmt_day=fmt_day, REP_LAST_TO_FULL=REP_LAST_TO_FULL,
+        CONLAN=CONLAN, STOKOE=STOKOE, scoring_system="1-3"
+    )
+    html = generate_html(d1, d2, data, analysis_html=analysis_html)
 
     # Save locally
     with open("report.html", "w", encoding="utf-8") as f:

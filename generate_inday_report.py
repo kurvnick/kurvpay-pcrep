@@ -632,14 +632,14 @@ def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
         <div><div class="callout-name">{r['name']}</div>
         <div class="callout-stats">{r['ac']:.0f}c &middot; {r['ad']:.1f}m &middot; {r['adl']:.0f}a &middot; {r['apd']:.0f}ap</div></div>
         <div class="callout-note">{r['reason']}</div>
-      </div>""" for r in rows if r["pts"] == 3) or '<div class="callout-item"><div>No reps flagged</div></div>'
+      </div>""" for r in rows if r["pts"] == 1) or '<div class="callout-item"><div>No reps flagged</div></div>'
 
     greens = "".join(f"""
       <div class="callout-item">
         <div><div class="callout-name">{r['name']}</div>
         <div class="callout-stats">{r['ac']:.0f}c &middot; {r['ad']:.1f}m &middot; {r['adl']:.0f}a &middot; {r['apd']:.0f}ap</div></div>
-        <div class="callout-note">{r['reason']}</div>
-      </div>""" for r in rows if r["pts"] == 1) or '<div class="callout-item"><div>No green performers yet</div></div>'
+        <div class="callout-note">{badge(r['pts'])}</div>
+      </div>""" for r in rows if r["pts"] >= 4) or '<div class="callout-item"><div>No top performers yet today</div></div>'
 
     cs = data["conlan_stats"]
     ss = data["stokoe_stats"]

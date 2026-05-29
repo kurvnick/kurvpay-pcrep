@@ -30,10 +30,10 @@ REP_LAST_TO_FULL = {
     "Carranza":"Romario Carranza","Silva":"Russell Silva","Riley":"Samantha Riley",
     "Bender":"Samuel Bender",
 }
-CONLAN = {"Kopstein","Silva","Friedhoff","McCausland","Riley","Weiss","Vartevanian",
+CONLAN = {"Kopstein","Silva","Friedhoff","Riley","Weiss","Vartevanian",
           "Colovas","Green","Crozier","Landeros","Riffe","Todd"}
 STOKOE = {"Daleske","Heflin","Travis","Villasenor","Margolis","Jackson","Lotut",
-          "Koestner","Wilkie","Gilden","Bender","Carranza"}
+          "Koestner","Wilkie","Gilden","Bender","Carranza","McCausland"}
 ALL_REPS = set(REP_LAST_TO_FULL.keys())
 APPROVAL_STAGES = ["Approved", "Conditionally Approved", "Auto Approved", "Auto Approved New"]
 

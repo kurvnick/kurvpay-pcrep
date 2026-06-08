@@ -818,6 +818,7 @@ def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
       <th class="r">Duration</th>
       <th class="r">Accounts</th>
       <th class="r" style="color:var(--pur)">Approvals</th>
+      <th class="r">Avg S2L</th>
       <th class="r">PTS</th>
       <th>Reason</th>
     </tr></thead>

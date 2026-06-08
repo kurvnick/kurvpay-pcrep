@@ -504,6 +504,7 @@ def generate_html(d1, d2, acct_days, data, analysis_html=""):
         <td class="r">{r['ad']:.1f}m</td>
         <td class="r">{r['adl']:.2f}</td>
         <td class="apprvs">{r['apd']:.1f}</td>
+        <td class="r">{s2l_badge(r['s2l'])}</td>
         <td class="r">{badge(r['pts'])}</td>
         <td class="reason">{r['reason']}</td>
       </tr>"""

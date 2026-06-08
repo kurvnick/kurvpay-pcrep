@@ -160,7 +160,7 @@ def pull_speed_to_lead(token, day_str):
     records   = zoho_coql(token,
         f"SELECT Owner, Time_to_First_Touch, Created_Time FROM Leads "
         f"WHERE Created_Time >= '{start_utc}' "
-        f"AND Time_to_First_Touch != null"
+        f"AND Time_to_First_Touch > 0"
     )
     BIZ_START, BIZ_END, CAP = 6, 18, 120
     totals = defaultdict(float)

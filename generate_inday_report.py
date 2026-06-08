@@ -172,7 +172,7 @@ def pull_speed_to_lead(token, day_str):
     records   = zoho_coql(token,
         f"SELECT Owner, Time_to_First_Touch, Created_Time FROM Leads "
         f"WHERE Created_Time >= '{start_utc}' "
-        f"AND Time_to_First_Touch != null"
+        f"AND Time_to_First_Touch > 0"
     )
     BIZ_START, BIZ_END, CAP = 6, 18, 120
     totals = defaultdict(float)
@@ -713,6 +713,8 @@ def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
     org_avg_d  = sum(r["ad"]  for r in rows) / n
     org_avg_a  = sum(r["adl"] for r in rows) / n
     org_tot_ap = data["org_tot_ap"]
+    s2l_vals    = [r["s2l"] for r in rows if r.get("s2l") is not None]
+    org_avg_s2l = round(sum(s2l_vals)/len(s2l_vals), 1) if s2l_vals else None
     d1_fmt = fmt_day(d1)
     now_pt = now_pt_str()
     chart_html = generate_hourly_chart(data.get("hourly_counts", {}), d1_fmt)

@@ -166,30 +166,32 @@ def access_token():
         "refresh_token":os.environ["ZOHO_REFRESH_TOKEN"],"client_id":os.environ["ZOHO_CLIENT_ID"],
         "client_secret":os.environ["ZOHO_CLIENT_SECRET"],"grant_type":"refresh_token"})
     r.raise_for_status(); return r.json()["access_token"]
-def coql(token, query):
+def _coql(token, q):
     dc=os.environ.get("ZOHO_DC") or "com"
-    rows=[]; offset=0
+    r=requests.post(f"https://www.zohoapis.{dc}/crm/v6/coql",
+                    headers={"Authorization":f"Zoho-oauthtoken {token}"},
+                    json={"select_query":q})
+    if r.status_code==204: return []
+    if r.status_code>=400:
+        raise SystemExit(f"COQL {r.status_code} error:\n{r.text}\n---QUERY---\n{q}")
+    return r.json().get("data",[])
+def pull_leads(token, start, end):
+    base=(f"SELECT id, First_Name, Last_Name, Company, Email, Phone, Mobile, State, "
+          f"Lead_Source, Lead_Status, Created_Time FROM Leads "
+          f"WHERE (Created_Time between '{start}' and '{end}')")
+    out=[]; last_id=0
     while True:
-        q=query+f" LIMIT {offset},200"
-        r=requests.post(f"https://www.zohoapis.{dc}/crm/v6/coql",
-                        headers={"Authorization":f"Zoho-oauthtoken {token}"},json={"select_query":q})
-        if r.status_code==204: break
-        if r.status_code>=400:
-            raise SystemExit(f"COQL {r.status_code} error:\n{r.text}\n---QUERY---\n{q}")
-        j=r.json(); rows+=j.get("data",[])
-        if not j.get("info",{}).get("more_records"): break
-        offset+=200; time.sleep(0.2)
-    return rows
-def pull_leads(token,start,end):
-    q=(f"SELECT id, First_Name, Last_Name, Company, Email, Phone, Mobile, State, Lead_Source, "
-       f"Lead_Status, Created_Time FROM Leads WHERE Created_Time between '{start}' and '{end}'")
-    raw=coql(token,q)
-    out=[]
-    for r in raw:
-        out.append({"first":r.get("First_Name"),"last":r.get("Last_Name"),"company":r.get("Company"),
-                    "email":r.get("Email"),"phone":r.get("Phone"),"mobile":r.get("Mobile"),
-                    "state":r.get("State"),"source":r.get("Lead_Source"),"actual":r.get("Lead_Status"),
-                    "created":r.get("Created_Time")})
+        q=base+f" and id > {last_id} ORDER BY id ASC LIMIT 200"
+        page=_coql(token, q)
+        if not page: break
+        for r in page:
+            out.append({"first":r.get("First_Name"),"last":r.get("Last_Name"),"company":r.get("Company"),
+                        "email":r.get("Email"),"phone":r.get("Phone"),"mobile":r.get("Mobile"),
+                        "state":r.get("State"),"source":r.get("Lead_Source"),"actual":r.get("Lead_Status"),
+                        "created":r.get("Created_Time")})
+        last_id=page[-1]["id"]
+        if len(page)<200: break
+        time.sleep(0.2)
     return out
 
 def is_overnight(created_iso):

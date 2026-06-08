@@ -161,6 +161,64 @@ def pull_approvals(token, day_str):
     print(f"  [approvals] total: {sum(counts.values())}")
     return dict(counts)
 
+def pull_speed_to_lead(token, day_str):
+    """
+    Returns {last_name: avg_minutes} for speed-to-lead.
+    Filters: business hours only (6am-6pm PT), nulls excluded, 120-min cap.
+    Time_to_First_Touch is stored in minutes in Zoho.
+    """
+    day       = date.fromisoformat(day_str)
+    start_utc = f"{day}T00:00:00+00:00"
+    records   = zoho_coql(token,
+        f"SELECT Owner, Time_to_First_Touch, Created_Time FROM Leads "
+        f"WHERE Created_Time >= '{start_utc}' "
+        f"AND Time_to_First_Touch != null"
+    )
+    BIZ_START, BIZ_END, CAP = 6, 18, 120
+    totals = defaultdict(float)
+    counts = defaultdict(int)
+    for r in records:
+        ttft = r.get("Time_to_First_Touch")
+        if ttft is None:
+            continue
+        cst = r.get("Created_Time", "")
+        if not cst or cst[:10] != day_str:
+            continue
+        try:
+            hour = int(cst[11:13])
+        except (ValueError, IndexError):
+            continue
+        if not (BIZ_START <= hour < BIZ_END):
+            continue
+        if ttft > CAP:
+            continue
+        owner = r.get("Owner", {}).get("name", "")
+        if owner in ALL_REPS:
+            totals[owner] += ttft
+            counts[owner] += 1
+    return {last: round(totals[last] / counts[last], 1) if counts[last] > 0 else None
+            for last in ALL_REPS}
+
+
+def s2l_badge(mins):
+    """Return colored HTML badge for speed-to-lead value."""
+    if mins is None:
+        return '<span style="font-family:IBM Plex Mono,monospace;font-size:11px;color:#9ca3af">—</span>'
+    if mins < 5:
+        bg, fg, label = "#d1fae5", "#05764a", f"{mins:.1f}m ★"
+    elif mins < 10:
+        bg, fg, label = "#e0f2fe", "#0e7490", f"{mins:.1f}m"
+    elif mins < 20:
+        bg, fg, label = "#fef9e6", "#a86400", f"{mins:.1f}m"
+    elif mins < 30:
+        bg, fg, label = "#fff7ed", "#c2410c", f"{mins:.1f}m"
+    else:
+        bg, fg, label = "#fdf0f0", "#c0111a", f"{mins:.1f}m"
+    return ('<span style="display:inline-block;font-family:IBM Plex Mono,monospace;'
+            f'font-size:11px;border-radius:4px;padding:1px 6px;'
+            f'background:{bg};color:{fg}">{label}</span>')
+
+
 # ── SCORING ──────────────────────────────────────────────────────────────────
 def score(calls, dur, accts):
     if accts >= 3 or (calls >= 150 and accts >= 2):
@@ -669,6 +727,7 @@ def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
         <td class="r">{r['ad']:.1f}m</td>
         <td class="r">{r['adl']:.0f}</td>
         <td class="approvals">{r['apd']:.0f}</td>
+        <td class="r">{s2l_badge(r['s2l'])}</td>
         <td class="r">{badge(r['pts'])}</td>
         <td class="reason">{r['reason']}</td>
       </tr>"""
@@ -740,6 +799,7 @@ def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
     <div class="legend-item"><span class="leg-dot" style="background:var(--org)"></span>2-ORG &mdash; 2 of: 50+ calls / 30+ min / 1+ acct</div>
     <div class="legend-item"><span class="leg-dot" style="background:var(--red)"></span>1-RED &mdash; below all thresholds</div>
     <div class="legend-item"><span class="leg-dot" style="background:var(--pur)"></span>Approvals &mdash; informational</div>
+    <div class="legend-item"><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;background:#d1fae5;color:#05764a;border-radius:3px;padding:1px 5px;margin-right:2px">&lt;5m ★</span><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;background:#e0f2fe;color:#0e7490;border-radius:3px;padding:1px 5px;margin:0 2px">&lt;10m</span><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;background:#fef9e6;color:#a86400;border-radius:3px;padding:1px 5px;margin:0 2px">&lt;20m</span><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;background:#fff7ed;color:#c2410c;border-radius:3px;padding:1px 5px;margin:0 2px">&lt;30m</span><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;background:#fdf0f0;color:#c0111a;border-radius:3px;padding:1px 5px;margin:0 2px">30m+</span> Speed to lead</div>
   </div>
   <div class="summary-row">
     <div class="scard"><div class="scard-label">5-GRN (best)</div><div class="scard-val c5">{cnt5}</div></div>
@@ -767,6 +827,7 @@ def generate_html(d1, data, analysis_html="", inday_analysis_html=""):
         <td class="r" style="font-weight:600;padding:9px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px">{org_avg_d:.1f}m avg</td>
         <td class="r" style="font-weight:600;padding:9px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px">{org_avg_a:.2f} avg</td>
         <td style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--pur);font-weight:600;padding:9px 12px">{org_tot_ap} total</td>
+        <td style="text-align:right;padding:9px 12px">{s2l_badge(org_avg_s2l)}</td>
         <td colspan="2" style="padding:9px 12px;font-size:11px;color:var(--ink3);font-family:'IBM Plex Mono',monospace">today&apos;s activity only &middot; as of {now_str}</td>
       </tr>
     </tfoot>
@@ -816,6 +877,9 @@ def main():
     print("Pulling approvals...")
     apprvs = pull_approvals(token, d1)
 
+    print("Pulling speed to lead...")
+    s2l_today = pull_speed_to_lead(token, d1)
+
     print("Pulling rolling data...")
     conlan_rolling = compute_rolling(token, CONLAN)
     stokoe_rolling = compute_rolling(token, STOKOE)
@@ -829,7 +893,7 @@ def main():
         pts, reason = score(c, dur, a)
         rows.append({"name": name, "last": last,
                      "ac": c, "ad": dur, "adl": a, "apd": ap,
-                     "pts": pts, "reason": reason})
+                     "pts": pts, "reason": reason, "s2l": s2l_today.get(last)})
 
     def team_stats(team_set):
         tr  = [r for r in rows if r["last"] in team_set]

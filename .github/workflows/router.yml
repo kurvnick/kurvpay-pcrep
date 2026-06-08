@@ -31,7 +31,7 @@ jobs:
 
       - name: Run router (read-only — Excel out only)
         env:
-          ZOHO_DC:            ${{ secrets.ZOHO_DC }}
+          ZOHO_DC:            com
           ZOHO_CLIENT_ID:     ${{ secrets.ZOHO_CLIENT_ID }}
           ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
           ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}

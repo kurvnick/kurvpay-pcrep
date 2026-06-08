@@ -167,14 +167,16 @@ def access_token():
         "client_secret":os.environ["ZOHO_CLIENT_SECRET"],"grant_type":"refresh_token"})
     r.raise_for_status(); return r.json()["access_token"]
 def coql(token, query):
-    dc=os.environ.get("ZOHO_DC","com")
+    dc=os.environ.get("ZOHO_DC") or "com"
     rows=[]; offset=0
     while True:
         q=query+f" LIMIT {offset},200"
         r=requests.post(f"https://www.zohoapis.{dc}/crm/v6/coql",
                         headers={"Authorization":f"Zoho-oauthtoken {token}"},json={"select_query":q})
         if r.status_code==204: break
-        r.raise_for_status(); j=r.json(); rows+=j.get("data",[])
+        if r.status_code>=400:
+            raise SystemExit(f"COQL {r.status_code} error:\n{r.text}\n---QUERY---\n{q}")
+        j=r.json(); rows+=j.get("data",[])
         if not j.get("info",{}).get("more_records"): break
         offset+=200; time.sleep(0.2)
     return rows

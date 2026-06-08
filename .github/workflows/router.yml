@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install -r requirements.txt
+      - run: pip install requests openpyxl
 
       - name: Run router (read-only — Excel out only)
         env:

@@ -38,7 +38,7 @@ jobs:
         run: |
           D=$(TZ=America/Los_Angeles date +%F)
           mkdir -p logs
-          python overnight_router.py --date "$D" --out "logs/decisions_${D}.xlsx"
+          python overnight_router.py --days 90 --out "logs/backfill_90d.xlsx"
 
       - name: Commit the log
         run: |

@@ -1,21 +1,17 @@
 name: PC In-Day Activity Report
 
-# NOTE: same workflow name + filename as before, so your cron-job.org
-# workflow_dispatch trigger keeps working unchanged. Same repo secrets.
-
 on:
   schedule:
-    # Every 30 min, 8am-6pm PT (unchanged from the old In-Day report).
-    - cron: '0,30 15-23 * * 1-5'
-    - cron: '0,30 0-1 * * 2-6'
+    - cron: '*/10 14-23 * * 1-5'
+    - cron: '*/10 0-2 * * 2-6'
   workflow_dispatch:
-
-permissions:
-  contents: write          # needed so the snapshot state can be committed back
 
 jobs:
   generate-inday-report:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -28,22 +24,10 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Generate and upload dashboard
+      - name: Generate and upload in-day report
         env:
           ZOHO_CLIENT_ID:     ${{ secrets.ZOHO_CLIENT_ID }}
           ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
           ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
           TIINY_API_KEY:      ${{ secrets.TIINY_API_KEY }}
         run: python generate_inday_report.py
-
-      - name: Persist UDW snapshot state
-        run: |
-          if [[ -n "$(git status --porcelain udw_snapshot_state.json)" ]]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add udw_snapshot_state.json
-            git commit -m "Update UDW snapshot state [skip ci]"
-            git push
-          else
-            echo "No snapshot change this run."
-          fi

@@ -1,805 +1,509 @@
+#!/usr/bin/env python3
 """
-KurvPay PC Rep Daily Report Generator
-Pulls data from Zoho CRM, scores reps, generates HTML, uploads to tiiny.host
-Run daily via GitHub Actions at 5am PT (12:00 UTC Mon-Fri)
+PC In-Day slot -> Underwriting Velocity Monitor
+===============================================
+This REPLACES the old generate_inday_report.py. It reuses the existing repo
+secrets (ZOHO_CLIENT_ID / ZOHO_CLIENT_SECRET / ZOHO_REFRESH_TOKEN / TIINY_API_KEY)
+and the same tiiny.host upload path, so no new refresh token is needed.
+
+It tracks a configurable roster of reps and, for every lead they push to
+"Sent App to Merchant", measures how long the deal takes to move through
+underwriting:
+
+  Anchor : lead -> "Sent App to Merchant"                  [Lead Status History]
+  S1     : "Sent App to Merchant" -> "App in Bank"          [Lead Status History]  historical
+  S2     : "App in Bank" -> UDW Notes first populated        [daily snapshot]        forward-only
+  S3     : UDW Notes first populated -> "UW / Stips Needed"  [snapshot + DealHistory]forward-only start
+  S4     : "UW / Stips Needed" -> Approved / Declined         [DealHistory]           historical
+
+UDW Notes is NOT history-tracked in CRM, so S2/S3 accrue forward from the first
+run: we persist the first run in which each deal shows a non-empty UDW_Notes in
+STATE_FILE. For that to survive between runs, the workflow must commit STATE_FILE
+back to the repo (see the updated inday_report.yml).
+
+  python generate_inday_report.py          # live run: build + upload
+  python generate_inday_report.py --demo    # render bundled real sample, no API
 """
 
-import os
-import sys
-from report_analysis import generate_analysis
-import json
+from __future__ import annotations
+import os, sys, re, io, json, zipfile, statistics
+from datetime import datetime, timezone, timedelta
 import requests
-from datetime import date, timedelta, datetime
-from collections import defaultdict
 
-# ── CONFIG (set as GitHub Secrets, never hardcode) ──────────────────────────
-ZOHO_CLIENT_ID     = os.environ["ZOHO_CLIENT_ID"]
-ZOHO_CLIENT_SECRET = os.environ["ZOHO_CLIENT_SECRET"]
-ZOHO_REFRESH_TOKEN = os.environ["ZOHO_REFRESH_TOKEN"]
-TIINY_API_KEY      = os.environ["TIINY_API_KEY"]
-TIINY_DOMAIN       = "paymentcloudcallstats"  # subdomain only, no .tiiny.site
+# ----------------------------------------------------------------------------
+# CONFIG  (edit here)
+# ----------------------------------------------------------------------------
 
-# ── CONSTANTS ────────────────────────────────────────────────────────────────
-REP_LAST_TO_FULL = {
-    "Gilden":"Brandon Gilden","Green":"Brisa Green","Heflin":"Bryan Heflin",
-    "Kopstein":"Cheryl Kopstein","Jackson":"Daniel Jackson","Weiss":"Eric Weiss",
-    "Travis":"Faith Travis","Riffe":"Frank Riffe","Vartevanian":"Hovak Vartevanian",
-    "Todd":"Jessie Todd","Colovas":"John Colovas","Lotut":"Jonathan Lotut",
-    "Koestner":"Jordan Koestner","Landeros":"Julian Landeros","Margolis":"Julie Margolis",
-    "Villasenor":"Kirstan Villasenor","Friedhoff":"Matthew Friedhoff","Crozier":"Max Crozier",
-    "Daleske":"Melissa Daleske","Wilkie":"Nathan Wilkie","McCausland":"Richard McCausland",
-    "Carranza":"Romario Carranza","Silva":"Russell Silva","Riley":"Samantha Riley",
-    "Bender":"Samuel Bender",
+REPS = {
+    "Hovak Vartevanian":  "1429371000290569001",
+    "Richard McCausland": "1429371000061247891",
+    "Jordan Koestner":    "1429371000364991270",
+    "Nathan Wilkie":      "1429371000381063121",
+    "Samuel Bender":      "1429371000646655001",
 }
-CONLAN = {"Kopstein","Silva","Friedhoff","Riley","Weiss","Vartevanian",
-          "Colovas","Green","Crozier","Landeros","Riffe","Todd"}
-STOKOE = {"Daleske","Heflin","Travis","Villasenor","Margolis","Jackson","Lotut",
-          "Koestner","Wilkie","Gilden","Bender","Carranza","McCausland"}
-ALL_REPS = set(REP_LAST_TO_FULL.keys())
 
-APPROVAL_STAGES = ["Approved", "Conditionally Approved", "Auto Approved", "Auto Approved New"]
+ANCHOR_MOVED_TO = "Sent App to Merchant"   # lead status that starts the clock
+APP_IN_BANK     = "App in Bank"            # lead status, end of S1
+UW_STIPS        = "UW / Stips Needed"      # deal stage, end of S3 / start of S4
+DECISION_STAGES = ["Approved", "Declined"] # deal stages, end of S4
 
-# ── TIMEZONE ─────────────────────────────────────────────────────────────────
-try:
-    from zoneinfo import ZoneInfo
-    _PT = ZoneInfo("America/Los_Angeles")
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "tzdata", "-q"])
-    from zoneinfo import ZoneInfo
-    _PT = ZoneInfo("America/Los_Angeles")
+THRESHOLDS = {                              # (fast_max, watch_max) in DAYS
+    "S1": (1.0, 3.0),
+    "S2": (0.5, 2.0),
+    "S3": (1.0, 3.0),
+    "S4": (2.0, 7.0),
+}
 
-def today_pt():
-    """Return today's date in Pacific time as an ISO string (DST-aware)."""
-    return datetime.now(_PT).strftime("%Y-%m-%d")
+LOOKBACK_DAYS = 120
+STATE_FILE    = "udw_snapshot_state.json"
+OUTPUT_FILE   = "index.html"
 
-def pt_offset_str():
-    """Return current UTC offset string for Pacific time, e.g. '-07:00' or '-08:00'."""
-    offset = datetime.now(_PT).utcoffset()
-    total_minutes = int(offset.total_seconds() // 60)
-    sign = "+" if total_minutes >= 0 else "-"
-    h, m = divmod(abs(total_minutes), 60)
-    return f"{sign}{h:02d}:{m:02d}"
+# Publishes to the same site the In-Day report used -> this OVERWRITES it.
+# Change this (and create the subdomain on tiiny.host) to publish elsewhere.
+TIINY_DOMAIN  = "paymentcloudcallstats-inday"
 
-GOALS = {"calls": 125, "duration": 120, "accounts": 3}
+# Zoho hosts (US DC, matching the existing setup).
+ACCOUNTS_HOST = os.environ.get("ZOHO_ACCOUNTS_HOST", "https://accounts.zoho.com")
+API_HOST      = os.environ.get("ZOHO_API_HOST", "https://www.zohoapis.com")
+COQL_URL      = f"{API_HOST}/crm/v7/coql"   # v7 — v2/v3 reject these queries
 
-# ── ZOHO AUTH ────────────────────────────────────────────────────────────────
-def get_access_token():
-    r = requests.post("https://accounts.zoho.com/oauth/v2/token", data={
-        "refresh_token": ZOHO_REFRESH_TOKEN,
-        "client_id":     ZOHO_CLIENT_ID,
-        "client_secret": ZOHO_CLIENT_SECRET,
+REP_IDS   = set(REPS.values())
+ID_TO_REP = {v: k for k, v in REPS.items()}
+
+# ----------------------------------------------------------------------------
+# ZOHO  (same auth + COQL pattern as the other reports)
+# ----------------------------------------------------------------------------
+
+def _access_token() -> str:
+    r = requests.post(f"{ACCOUNTS_HOST}/oauth/v2/token", data={
+        "refresh_token": os.environ["ZOHO_REFRESH_TOKEN"],
+        "client_id":     os.environ["ZOHO_CLIENT_ID"],
+        "client_secret": os.environ["ZOHO_CLIENT_SECRET"],
         "grant_type":    "refresh_token",
-    })
+    }, timeout=30)
     r.raise_for_status()
-    return r.json()["access_token"]
+    tok = r.json().get("access_token")
+    if not tok:
+        raise RuntimeError(f"Token refresh failed: {r.text}")
+    return tok
 
-def zoho_coql(token, query):
-    headers = {"Authorization": f"Zoho-oauthtoken {token}"}
-    records = []
-    offset = 0
+
+def coql(token: str, query: str) -> list[dict]:
+    """COQL with LIMIT offset,count pagination (pages of 200)."""
+    headers = {"Authorization": f"Zoho-oauthtoken {token}",
+               "Content-Type": "application/json"}
+    rows, offset, page = [], 0, 200
     while True:
-        # Zoho COQL requires LIMIT before OFFSET, and is finicky about spacing
-        paginated = f"{query.strip()} LIMIT 200 OFFSET {offset}"
-        r = requests.post(
-            "https://www.zohoapis.com/crm/v7/coql",
-            headers=headers,
-            json={"select_query": paginated},
-        )
-        if r.status_code == 204:
+        q = f"{query} limit {offset}, {page}" if offset else f"{query} limit {page}"
+        r = requests.post(COQL_URL, headers=headers, json={"select_query": q}, timeout=60)
+        if r.status_code == 204:           # no records
             break
-        if r.status_code != 200:
-            print(f"  [zoho_coql] ERROR {r.status_code}: {r.text[:300]}")
+        r.raise_for_status()
+        payload = r.json()
+        rows.extend(payload.get("data", []))
+        if not payload.get("info", {}).get("more_records"):
             break
-        data = r.json()
-        if "data" not in data or not data["data"]:
-            if "info" not in data:
-                print(f"  [zoho_coql] unexpected response: {str(data)[:300]}")
-            break
-        records.extend(data["data"])
-        if not data.get("info", {}).get("more_records"):
-            break
-        offset += 200
-    return records
-
-# ── DATA PULLS ───────────────────────────────────────────────────────────────
-def pull_calls(token, day_str):
-    """Returns {last_name: (call_count, duration_minutes)}.
-    Zoho COQL does not support two range conditions on the same datetime field,
-    so we query from start of day forward and filter the upper bound in Python."""
-    day       = date.fromisoformat(day_str)
-    next_day  = day + timedelta(days=1)
-    start_utc = f"{day}T00:00:00+00:00"
-    # Store next_day string for Python-side filtering
-    next_day_str = str(next_day)
-    query = (
-        f"SELECT Owner, Call_Duration_in_seconds, Call_Start_Time FROM Calls "
-        f"WHERE Call_Start_Time >= '{start_utc}' "
-        f"AND Call_Type not in ('Missed')"
-    )
-    print(f"  [calls query] {query[:140]}")
-    records = zoho_coql(token, query)
-    print(f"  [calls] {len(records)} raw records, filtering to {day_str}")
-    counts = defaultdict(int)
-    secs   = defaultdict(int)
-    for r in records:
-        # Filter upper bound in Python — keep only records from day_str
-        cst = r.get("Call_Start_Time", "")
-        if not cst or cst[:10] != day_str:
-            continue
-        owner = r.get("Owner", {}).get("name", "")
-        if owner in ALL_REPS:
-            counts[owner] += 1
-            secs[owner]   += (r.get("Call_Duration_in_seconds") or 0)
-    print(f"  [calls] {sum(counts.values())} records matched {day_str}")
-    return {last: (counts[last], round(secs[last] / 60, 1)) for last in ALL_REPS}
-    counts = defaultdict(int)
-    secs   = defaultdict(int)
-    for r in records:
-        owner = r.get("Owner", {}).get("name", "")
-        if owner in ALL_REPS:
-            counts[owner] += 1
-            secs[owner]   += (r.get("Call_Duration_in_seconds") or 0)
-    return {last: (counts[last], round(secs[last] / 60, 1)) for last in ALL_REPS}
-
-def pull_accounts(token, day_str):
-    """Returns {last_name: count}"""
-    day = date.fromisoformat(day_str)
-    next_day = day + timedelta(days=1)
-    start_utc = f"{day}T00:00:00+00:00"
-    end_utc   = f"{next_day}T00:00:00+00:00"
-    records = zoho_coql(token,
-        f"SELECT Owner FROM Accounts "
-        f"WHERE Created_Time >= '{start_utc}' "
-        f"AND Created_Time < '{end_utc}'"
-    )
-    counts = defaultdict(int)
-    for r in records:
-        owner = r.get("Owner", {}).get("name", "")
-        if owner in ALL_REPS:
-            counts[owner] += 1
-    return dict(counts)
-
-def pull_approvals(token, day_str):
-    """Returns {last_name: count} for all approval stages."""
-    counts = defaultdict(int)
-    for stage in APPROVAL_STAGES:
-        records = zoho_coql(token,
-            f"SELECT Owner, Closing_Date FROM Deals "
-            f"WHERE Stage = '{stage}' AND Closing_Date = '{day_str}'"
-        )
-        for r in records:
-            owner = r.get("Owner", {}).get("name", "")
-            if owner in ALL_REPS:
-                counts[owner] += 1
-    return dict(counts)
-
-def pull_speed_to_lead(token, day_str):
-    """
-    Returns {last_name: avg_minutes} for speed-to-lead.
-    Filters: business hours only (6am-6pm PT), nulls excluded, 120-min cap.
-    Time_to_First_Touch is stored in minutes in Zoho.
-    """
-    day       = date.fromisoformat(day_str)
-    start_utc = f"{day}T00:00:00+00:00"
-    records   = zoho_coql(token,
-        f"SELECT Owner, Time_to_First_Touch, Created_Time FROM Leads "
-        f"WHERE Created_Time >= '{start_utc}' "
-        f"AND Time_to_First_Touch > 0"
-    )
-    BIZ_START, BIZ_END, CAP = 6, 18, 120
-    totals = defaultdict(float)
-    counts = defaultdict(int)
-    for r in records:
-        ttft = r.get("Time_to_First_Touch")
-        if ttft is None:
-            continue
-        cst = r.get("Created_Time", "")
-        if not cst or cst[:10] != day_str:
-            continue
-        try:
-            hour = int(cst[11:13])
-        except (ValueError, IndexError):
-            continue
-        if not (BIZ_START <= hour < BIZ_END):
-            continue
-        if ttft > CAP:
-            continue
-        owner = r.get("Owner", {}).get("name", "")
-        if owner in ALL_REPS:
-            totals[owner] += ttft
-            counts[owner] += 1
-    return {last: round(totals[last] / counts[last], 1) if counts[last] > 0 else None
-            for last in ALL_REPS}
+        offset += page
+    return rows
 
 
-def s2l_badge(mins):
-    """Return colored HTML badge for speed-to-lead value."""
-    if mins is None:
-        return '<span style="font-family:IBM Plex Mono,monospace;font-size:11px;color:#9ca3af">—</span>'
-    if mins < 5:
-        bg, fg, label = "#d1fae5", "#05764a", f"{mins:.1f}m ★"
-    elif mins < 10:
-        bg, fg, label = "#e0f2fe", "#0e7490", f"{mins:.1f}m"
-    elif mins < 20:
-        bg, fg, label = "#fef9e6", "#a86400", f"{mins:.1f}m"
-    elif mins < 30:
-        bg, fg, label = "#fff7ed", "#c2410c", f"{mins:.1f}m"
-    else:
-        bg, fg, label = "#fdf0f0", "#c0111a", f"{mins:.1f}m"
-    return ('<span style="display:inline-block;font-family:IBM Plex Mono,monospace;'
-            f'font-size:11px;border-radius:4px;padding:1px 6px;'
-            f'background:{bg};color:{fg}">{label}</span>')
+def _id_list(ids) -> str:
+    return "(" + ",".join(f"'{i}'" for i in ids) + ")"
 
+# COQL gotchas baked in: no `!=` (use `not in`), no two range conditions on one
+# datetime field, no negative tz offsets in literals. We avoid all three by not
+# putting date literals in the WHERE at all and windowing client-side instead.
 
-# ── SCORING ──────────────────────────────────────────────────────────────────
-def score(calls, dur, accts):
-    if accts >= 3:                      return 1, "accounts &ge; 3"
-    if calls > 124:                     return 1, "calls &gt; 124"
-    if dur > 119:                       return 1, "duration &gt; 119 min"
-    if accts >= 2:                      return 2, "accounts &ge; 2"
-    if 99 < calls <= 149 and dur < 60:  return 2, "100&ndash;149 calls, &lt;60 min"
-    if 49 < calls <= 99 and dur > 59:   return 2, "50&ndash;99 calls, &gt;59 min"
-    if dur > 89 and calls < 50:         return 2, "duration &gt; 89 min"
-    return 3, "otherwise"
+def _parse(ts: str) -> datetime:
+    return datetime.fromisoformat(ts)
 
-# ── REPORT DATES ─────────────────────────────────────────────────────────────
-def last_two_business_days():
-    """Returns (day1, day2) as ISO strings — the two most recent weekdays in PT."""
-    today = date.fromisoformat(today_pt())
-    days = []
-    d = today - timedelta(days=1)
-    while len(days) < 2:
-        if d.weekday() < 5:
-            days.append(str(d))
-        d -= timedelta(days=1)
-    return days[1], days[0]  # older first
+def _within(ts: str, cutoff: datetime) -> bool:
+    return _parse(ts) >= cutoff
 
-# ── HTML GENERATION ──────────────────────────────────────────────────────────
-CSS = """
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --ink:#0f0f0f;--ink2:#444;--ink3:#888;--border:#e0e0e0;--border2:#f0f0f0;
-  --bg:#fafaf8;--white:#ffffff;
-  --grn:#05764a;--grn-bg:#e6f7ef;--grn-border:#b3e6ce;
-  --ylw:#a86400;--ylw-bg:#fef9e6;--ylw-border:#f5d98c;
-  --red:#c0111a;--red-bg:#fdf0f0;--red-border:#f0b0b3;
-  --pur:#5b21b6;--pur-bg:#ede9fe;--pur-border:#c4b5fd;
-}
-body{font-family:'IBM Plex Sans',sans-serif;background:var(--bg);color:var(--ink);min-height:100vh;padding:2.5rem 1.5rem 4rem}
-.page{max-width:980px;margin:0 auto}
-.masthead{display:flex;align-items:flex-end;justify-content:space-between;padding-bottom:1.25rem;margin-bottom:1.75rem;border-bottom:2px solid var(--ink);flex-wrap:wrap;gap:12px}
-.kicker{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink3);margin-bottom:5px}
-h1{font-size:22px;font-weight:600;line-height:1.2}
-.masthead-right{text-align:right;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink3);line-height:1.7}
-.goals-bar{display:flex;gap:10px;margin-bottom:1.5rem;flex-wrap:wrap}
-.goal-chip{display:flex;align-items:center;gap:7px;background:var(--white);border:1px solid var(--border);border-radius:6px;padding:7px 12px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink2)}
-.goal-chip .label{color:var(--ink3);margin-right:2px}
-.legend{display:flex;gap:20px;margin-bottom:1.5rem;flex-wrap:wrap;font-size:12px;color:var(--ink2)}
-.legend-item{display:flex;align-items:center;gap:6px}
-.leg-dot{width:8px;height:8px;border-radius:2px;display:inline-block}
-.summary-row{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:1.75rem}
-.scard{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
-.scard-label{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);margin-bottom:5px}
-.scard-val{font-size:30px;font-weight:600;line-height:1}
-.scard-val.red{color:var(--red)}.scard-val.grn{color:var(--grn)}.scard-val.ylw{color:var(--ylw)}
-.section-title{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink3);margin-bottom:.75rem;margin-top:2rem}
-.table-wrap{background:var(--white);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:1.5rem}
-table{width:100%;border-collapse:collapse;font-size:13px}
-thead tr{background:#f4f3ef;border-bottom:1.5px solid var(--border)}
-th{padding:9px 12px;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);font-weight:500;text-align:left;white-space:nowrap}
-th.r{text-align:right}
-td{padding:8px 12px;border-bottom:.5px solid var(--border2);vertical-align:middle}
-tr:last-child td{border-bottom:none}
-tr:hover td{background:#f9f8f5}
-td.r{text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12px}
-td.rep-name{font-weight:500}
-td.reason{font-size:11px;color:var(--ink3)}
-td.approvals{text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--pur);font-weight:500}
-tr.row-grn td:first-child{border-left:3px solid var(--grn)}
-tr.row-ylw td:first-child{border-left:3px solid #f5b800}
-tr.row-red td:first-child{border-left:3px solid var(--red)}
-.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:500;white-space:nowrap}
-.badge-grn{background:var(--grn-bg);color:var(--grn);border:1px solid var(--grn-border)}
-.badge-ylw{background:var(--ylw-bg);color:var(--ylw);border:1px solid var(--ylw-border)}
-.badge-red{background:var(--red-bg);color:var(--red);border:1px solid var(--red-border)}
-.callout-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.5rem}
-.callout-box{border-radius:10px;overflow:hidden;border:1px solid}
-.red-box{border-color:var(--red-border);background:var(--red-bg)}
-.grn-box{border-color:var(--grn-border);background:var(--grn-bg)}
-.callout-head{padding:10px 14px;font-size:12px;font-weight:600;border-bottom:1px solid}
-.red-box .callout-head{color:var(--red);border-color:var(--red-border)}
-.grn-box .callout-head{color:var(--grn);border-color:var(--grn-border)}
-.callout-item{padding:8px 14px;border-bottom:.5px solid;font-size:12px;display:flex;justify-content:space-between;align-items:center}
-.red-box .callout-item{border-color:var(--red-border)}
-.grn-box .callout-item{border-color:var(--grn-border)}
-.callout-item:last-child{border-bottom:none}
-.callout-name{font-weight:500}
-.callout-stats{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--ink3);margin-top:1px}
-.callout-note{font-size:11px;color:var(--ink3);text-align:right;max-width:140px}
-.sup-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.5rem}
-.sup-card{background:var(--white);border:1px solid var(--border);border-radius:12px;overflow:hidden}
-.sup-head{background:#f4f3ef;padding:12px 16px;border-bottom:1px solid var(--border)}
-.sup-name{font-size:14px;font-weight:600;margin-bottom:2px}
-.sup-team-size{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--ink3)}
-.sup-body{padding:14px 16px}
-.metric-label{font-size:11px;color:var(--ink3);font-family:'IBM Plex Mono',monospace;text-transform:uppercase;letter-spacing:.06em}
-.metric-val{font-size:18px;font-weight:600}
-.metric-goal{font-size:10px;color:var(--ink3);font-family:'IBM Plex Mono',monospace}
-.progress-bar-wrap{margin-top:4px;height:5px;background:var(--border2);border-radius:3px;width:120px}
-.progress-bar-fill{height:100%;border-radius:3px;background:#f5b800}
-.pts-dist{display:flex;gap:6px;margin-top:12px;padding-top:12px;border-top:1px solid var(--border2)}
-.pts-chip{flex:1;text-align:center;border-radius:6px;padding:8px 4px}
-.pts-chip .pts-num{font-size:18px;font-weight:600}
-.pts-chip .pts-lbl{font-size:10px;font-family:'IBM Plex Mono',monospace;text-transform:uppercase;letter-spacing:.06em;margin-top:2px}
-.grn-chip{background:var(--grn-bg);color:var(--grn)}
-.ylw-chip{background:var(--ylw-bg);color:var(--ylw)}
-.red-chip{background:var(--red-bg);color:var(--red)}
-.rolling-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.5rem}
-.rolling-card{background:var(--white);border:1px solid var(--border);border-radius:12px;overflow:hidden}
-.rolling-head{background:#f4f3ef;padding:10px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
-.rh-name{font-size:13px;font-weight:600}
-.rh-days{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--ink3)}
-.rolling-body{padding:14px 16px}
-.rs-label{font-size:11px;color:var(--ink3);font-family:'IBM Plex Mono',monospace;text-transform:uppercase;letter-spacing:.06em}
-.rs-val{font-size:16px;font-weight:600}
-.rs-bar-wrap{width:100px;height:4px;background:var(--border2);border-radius:2px;margin-top:3px}
-.rs-bar-fill{height:100%;border-radius:2px;background:#f5b800}
-.footer{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--ink3);padding-top:1.5rem;border-top:1px solid var(--border);display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;letter-spacing:.04em}
-@media(max-width:640px){.callout-grid,.sup-grid,.rolling-grid{grid-template-columns:1fr}th,td{padding:7px 9px}}
-@media print{body{background:#fff;padding:1rem}}
-"""
+def _norm(s) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
-def badge(pts):
-    cls = {1:"grn",2:"ylw",3:"red"}[pts]
-    label = {1:"1-GRN",2:"2-YLW",3:"3-RED"}[pts]
-    return f'<span class="badge badge-{cls}">{label}</span>'
+# ----------------------------------------------------------------------------
+# FETCH
+# ----------------------------------------------------------------------------
 
-def row_cls(pts):
-    return {1:"row-grn",2:"row-ylw",3:"row-red"}[pts]
-
-def fmt_day(d):
-    dt = date.fromisoformat(d)
-    return dt.strftime("%a %b %-d").replace(" 0"," ") if sys.platform != "win32" \
-        else dt.strftime("%a %b %d").lstrip("0")
-
-def now_pt_str():
-    """Return current Pacific time as a readable string."""
-    if sys.platform == "win32":
-        return datetime.now(_PT).strftime("%b %d, %Y %I:%M %p PT").replace(" 0", " ")
-    return datetime.now(_PT).strftime("%b %-d, %Y %-I:%M %p PT")
-
-def sup_card(name, team_size, avg_a, avg_ap, pct_goal, grn, ylw, red, tot_ap_d1, tot_ap_d2, d1, d2):
-    bar_w = min(100, int(avg_a / 3 * 100))
-    return f"""
-    <div class="sup-card">
-      <div class="sup-head">
-        <div class="sup-name">{name}</div>
-        <div class="sup-team-size">{team_size} reps</div>
-      </div>
-      <div class="sup-body">
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
-          <div>
-            <div class="metric-label">Avg accts / rep / day</div>
-            <div class="metric-val">{avg_a:.2f}</div>
-            <div class="metric-goal">Goal: 3.0 &middot; {bar_w}% to goal</div>
-            <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:{bar_w}%"></div></div>
-          </div>
-          <div>
-            <div class="metric-label">Avg apprvs / rep / day</div>
-            <div class="metric-val" style="color:var(--pur)">{avg_ap:.2f}</div>
-          </div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
-          <div>
-            <div class="metric-label">% reps at acct goal</div>
-            <div class="metric-val" style="font-size:16px">{pct_goal:.1f}%</div>
-          </div>
-          <div>
-            <div class="metric-label">Total apprvs / day</div>
-            <div class="metric-val" style="color:var(--pur);font-size:16px">{(tot_ap_d1+tot_ap_d2)/2:.1f}</div>
-            <div class="metric-goal">{tot_ap_d1} ({fmt_day(d1)}) &middot; {tot_ap_d2} ({fmt_day(d2)})</div>
-          </div>
-        </div>
-        <div class="pts-dist">
-          <div class="pts-chip grn-chip"><div class="pts-num">{grn}</div><div class="pts-lbl">1-GRN</div></div>
-          <div class="pts-chip ylw-chip"><div class="pts-num">{ylw}</div><div class="pts-lbl">2-YLW</div></div>
-          <div class="pts-chip red-chip"><div class="pts-num">{red}</div><div class="pts-lbl">3-RED</div></div>
-        </div>
-      </div>
-    </div>"""
-
-def rolling_card(sup_name, team_label, n_days, n_reps, avg_a, pct_goal, top3, bot3):
-    bar_w = min(100, int(avg_a / 3 * 100))
-    top_rows = "".join(
-        f'<div style="display:flex;justify-content:space-between"><span style="font-weight:500">{n}</span>'
-        f'<span style="font-family:\'IBM Plex Mono\',monospace;color:var(--grn)">{v:.2f}/day</span></div>'
-        for n,v in top3
-    )
-    bot_rows = "".join(
-        f'<div style="display:flex;justify-content:space-between"><span style="font-weight:500">{n}</span>'
-        f'<span style="font-family:\'IBM Plex Mono\',monospace;color:var(--red)">{v:.2f}/day</span></div>'
-        for n,v in bot3
-    )
-    return f"""
-    <div class="rolling-card">
-      <div class="rolling-head">
-        <div class="rh-name">{sup_name} &mdash; {team_label}</div>
-        <div class="rh-days">{n_days} days &middot; {n_reps} reps</div>
-      </div>
-      <div class="rolling-body">
-        <div style="display:flex;justify-content:space-between;margin-bottom:10px">
-          <div>
-            <div class="rs-label">Avg accts / rep / day</div>
-            <div class="rs-val">{avg_a:.2f}</div>
-            <div style="font-size:10px;color:var(--ink3);font-family:'IBM Plex Mono',monospace">Goal: 3.0 &middot; {bar_w}% to goal</div>
-            <div class="rs-bar-wrap"><div class="rs-bar-fill" style="width:{bar_w}%"></div></div>
-          </div>
-          <div style="text-align:right">
-            <div class="rs-label">% rep-days at goal</div>
-            <div class="rs-val" style="font-size:14px">{pct_goal:.1f}%</div>
-          </div>
-        </div>
-        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border2)">
-          <div class="rs-label" style="margin-bottom:8px">Top performers</div>
-          <div style="display:flex;flex-direction:column;gap:5px;font-size:12px">{top_rows}</div>
-        </div>
-        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border2)">
-          <div class="rs-label" style="margin-bottom:8px">Needs attention</div>
-          <div style="display:flex;flex-direction:column;gap:5px;font-size:12px">{bot_rows}</div>
-        </div>
-      </div>
-    </div>"""
-
-def generate_html(d1, d2, data, analysis_html=""):
-    rows = data["rows"]
-    grn_count = sum(1 for r in rows if r["pts"]==1)
-    ylw_count = sum(1 for r in rows if r["pts"]==2)
-    red_count = sum(1 for r in rows if r["pts"]==3)
-    n = len(rows)
-    org_avg_c  = sum(r["ac"] for r in rows)/n
-    org_avg_d  = sum(r["ad"] for r in rows)/n
-    org_avg_a  = sum(r["adl"] for r in rows)/n
-    org_avg_ap = sum(r["apd"] for r in rows)/n
-    s2l_vals    = [r["s2l"] for r in rows if r.get("s2l") is not None]
-    org_avg_s2l = round(sum(s2l_vals)/len(s2l_vals), 1) if s2l_vals else None
-    org_tot_ap_d1 = data["org_tot_ap_d1"]
-    org_tot_ap_d2 = data["org_tot_ap_d2"]
-
-    # Table rows
-    table_rows = ""
+def _earliest(rows, key_path):
+    """Earliest Modified_Time per parent record id along key_path (lookup)."""
+    out = {}
     for r in rows:
-        table_rows += f"""
-      <tr class="{row_cls(r['pts'])}">
-        <td class="rep-name">{r['name']}</td>
-        <td class="r">{r['ac']:.1f}</td>
-        <td class="r">{r['ad']:.1f}m</td>
-        <td class="r">{r['adl']:.1f}</td>
-        <td class="approvals">{r['apd']:.1f}</td>
-        <td class="r">{s2l_badge(r['s2l'])}</td>
-        <td class="r">{badge(r['pts'])}</td>
-        <td class="reason">{r['reason']}</td>
-      </tr>"""
+        pid = (r.get(key_path) or {}).get("id")
+        if not pid:
+            continue
+        t = r["Modified_Time"]
+        if pid not in out or _parse(t) < _parse(out[pid]):
+            out[pid] = t
+    return out
 
-    # Flagged list
-    flagged_items = ""
-    for r in [r for r in rows if r["pts"]==3]:
-        flagged_items += f"""
-      <div class="callout-item">
-        <div>
-          <div class="callout-name">{r['name']}</div>
-          <div class="callout-stats">{r['ac']:.1f}c &middot; {r['ad']:.1f}m &middot; {r['adl']:.1f}a &middot; {r['apd']:.1f}ap</div>
-        </div>
-        <div class="callout-note">{r['reason']}</div>
-      </div>"""
 
-    # Green list
-    green_items = ""
-    for r in [r for r in rows if r["pts"]==1]:
-        green_items += f"""
-      <div class="callout-item">
-        <div>
-          <div class="callout-name">{r['name']}</div>
-          <div class="callout-stats">{r['ac']:.1f}c &middot; {r['ad']:.1f}m &middot; {r['adl']:.1f}a &middot; {r['apd']:.1f}ap</div>
-        </div>
-        <div class="callout-note">{r['reason']}</div>
-      </div>"""
+def fetch_lead_transitions(token, moved_to, cutoff):
+    q = (f"select id, Full_Name, Moved_To__s, Modified_Time from Lead_Status_History "
+         f"where Full_Name.Owner in {_id_list(REP_IDS)} and Moved_To__s = '{moved_to}' "
+         f"order by Modified_Time desc")
+    return [r for r in coql(token, q) if _within(r["Modified_Time"], cutoff)]
 
-    # Supervisor cards
-    cs = data["conlan_stats"]
-    ss = data["stokoe_stats"]
-    conlan_card = sup_card("Brandon Conlan", cs["n"], cs["avg_a"], cs["avg_ap"],
-        cs["pct_goal"], cs["grn"], cs["ylw"], cs["red"],
-        cs["tot_ap_d1"], cs["tot_ap_d2"], d1, d2)
-    stokoe_card = sup_card("George Stokoe", ss["n"], ss["avg_a"], ss["avg_ap"],
-        ss["pct_goal"], ss["grn"], ss["ylw"], ss["red"],
-        ss["tot_ap_d1"], ss["tot_ap_d2"], d1, d2)
 
-    # Rolling cards
-    cr = data["conlan_rolling"]
-    sr = data["stokoe_rolling"]
-    conlan_roll = rolling_card("Brandon Conlan","Team Rolling", cr["n_days"], cr["n_reps"],
-        cr["avg_a"], cr["pct_goal"], cr["top3"], cr["bot3"])
-    stokoe_roll = rolling_card("George Stokoe","Team Rolling", sr["n_days"], sr["n_reps"],
-        sr["avg_a"], sr["pct_goal"], sr["top3"], sr["bot3"])
+def fetch_deal_transitions(token, moved_to, cutoff):
+    q = (f"select id, Potential_Name, Moved_To__s, Modified_Time from DealHistory "
+         f"where Potential_Name.Owner in {_id_list(REP_IDS)} and Moved_To__s = '{moved_to}' "
+         f"order by Modified_Time desc")
+    return [r for r in coql(token, q) if _within(r["Modified_Time"], cutoff)]
 
-    d1_fmt = fmt_day(d1)
-    d2_fmt = fmt_day(d2)
-    now_pt     = now_pt_str()
 
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PC Rep Report &mdash; {d1_fmt} &amp; {d2_fmt}</title>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
-<style>{CSS}</style>
-</head>
-<body>
-<div class="page">
+def fetch_records(token, module, fields, ids):
+    out, ids = {}, list(ids)
+    for i in range(0, len(ids), 100):
+        q = (f"select {', '.join(fields)} from {module} "
+             f"where id in {_id_list(ids[i:i+100])}")
+        for r in coql(token, q):
+            out[r["id"]] = r
+    return out
 
-  <div class="masthead">
-    <div>
-      <div class="kicker">KurvPay &mdash; PC Rep Performance</div>
-      <h1>2-Day Average &mdash; {d1_fmt} &amp; {d2_fmt}</h1>
-    </div>
-    <div class="masthead-right">
-      Metric: new accounts created<br>
-      Scoring: accounts &ge;3 OR calls &gt;124 OR dur &gt;119 min &rarr; 1-GRN<br>
-      Approvals: Approved / Conditionally Approved / Auto Approved
-    </div>
-  </div>
+# ----------------------------------------------------------------------------
+# UDW SNAPSHOT STATE (forward-only capture of blank -> value)
+# ----------------------------------------------------------------------------
 
-  <div class="goals-bar">
-    <div class="goal-chip"><span class="label">Daily goal:</span> 3 new accounts</div>
-    <div class="goal-chip"><span class="label">Daily goal:</span> 125 calls</div>
-    <div class="goal-chip"><span class="label">Daily goal:</span> 120 min talk time</div>
-  </div>
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
-  <div class="legend">
-    <div class="legend-item"><span class="leg-dot" style="background:var(--grn)"></span>1-GRN &mdash; accounts &ge;3 OR calls &gt;124 OR dur &gt;119 min</div>
-    <div class="legend-item"><span class="leg-dot" style="background:#f5b800"></span>2-YLW &mdash; accounts &ge;2 or activity threshold met</div>
-    <div class="legend-item"><span class="leg-dot" style="background:var(--red)"></span>3-RED &mdash; below all thresholds</div>
-    <div class="legend-item"><span class="leg-dot" style="background:var(--pur)"></span>Approvals &mdash; informational, does not affect PTS</div>
-    <div class="legend-item"><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;background:#d1fae5;color:#05764a;border-radius:3px;padding:1px 5px;margin-right:2px">&lt;5m ★</span><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;background:#e0f2fe;color:#0e7490;border-radius:3px;padding:1px 5px;margin:0 2px">&lt;10m</span><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;background:#fef9e6;color:#a86400;border-radius:3px;padding:1px 5px;margin:0 2px">&lt;20m</span><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;background:#fff7ed;color:#c2410c;border-radius:3px;padding:1px 5px;margin:0 2px">&lt;30m</span><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;background:#fdf0f0;color:#c0111a;border-radius:3px;padding:1px 5px;margin:0 2px">30m+</span> Speed to lead (avg S2L, biz hrs, 120m cap)</div>
-  </div>
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
 
-  <div class="summary-row">
-    <div class="scard"><div class="scard-label">1-GRN performers</div><div class="scard-val grn">{grn_count}</div></div>
-    <div class="scard"><div class="scard-label">2-YLW middle tier</div><div class="scard-val ylw">{ylw_count}</div></div>
-    <div class="scard"><div class="scard-label">3-RED flagged</div><div class="scard-val red">{red_count}</div></div>
-  </div>
+def update_udw_snapshot(state, deals, now_iso):
+    for did, d in deals.items():
+        if (d.get("UDW_Notes") or "").strip() and did not in state:
+            state[did] = now_iso
+    return state
 
-  <div class="section-title">Rep scorecard &mdash; avg of {d1_fmt} &amp; {d2_fmt}</div>
-  <div class="table-wrap"><table>
-    <thead><tr>
-      <th>Rep</th>
-      <th class="r">Avg calls</th>
-      <th class="r">Avg dur</th>
-      <th class="r">Avg accts</th>
-      <th class="r" style="color:var(--pur)">Avg apprvs</th>
-      <th class="r">Avg S2L</th>
-      <th class="r">PTS</th>
-      <th>Reason</th>
-    </tr></thead>
-    <tbody>{table_rows}</tbody>
-    <tfoot>
-      <tr style="background:#f4f3ef;border-top:1.5px solid var(--border)">
-        <td style="font-family:'IBM Plex Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink3);font-weight:500;padding:9px 12px">Org avg &mdash; {n} reps</td>
-        <td class="r" style="font-weight:600;padding:9px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px">{org_avg_c:.1f}</td>
-        <td class="r" style="font-weight:600;padding:9px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px">{org_avg_d:.1f}m</td>
-        <td class="r" style="font-weight:600;padding:9px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px">{org_avg_a:.2f}</td>
-        <td style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--pur);font-weight:600;padding:9px 12px">{org_avg_ap:.2f}</td>
-        <td style="text-align:right;padding:9px 12px">{s2l_badge(org_avg_s2l)}</td>
-        <td colspan="2" style="padding:9px 12px;font-size:11px;color:var(--ink3);font-family:'IBM Plex Mono',monospace">
-          2-day avg per rep &middot; total org apprvs: {org_tot_ap_d1} ({d1_fmt}) / {org_tot_ap_d2} ({d2_fmt}) &middot; avg {(org_tot_ap_d1+org_tot_ap_d2)/2:.1f}/day
-        </td>
-      </tr>
-    </tfoot>
-  </table></div>
+# ----------------------------------------------------------------------------
+# COMPUTE
+# ----------------------------------------------------------------------------
 
-  <div class="callout-grid">
-    <div class="callout-box red-box">
-      <div class="callout-head">&#9888; Flagged for leadflow review &mdash; {red_count} reps</div>
-      {flagged_items if flagged_items else '<div class="callout-item"><div>No reps flagged today</div></div>'}
-    </div>
-    <div class="callout-box grn-box">
-      <div class="callout-head">&#10003; 1-GRN performers &mdash; {grn_count} reps</div>
-      {green_items if green_items else '<div class="callout-item"><div>No green performers today</div></div>'}
-    </div>
-  </div>
+def speed(seg_key, days):
+    if days is None:
+        return "pending"
+    fast, watch = THRESHOLDS[seg_key]
+    return "fast" if days <= fast else ("watch" if days <= watch else "slow")
 
-  <div class="section-title">Supervisor team comparison &mdash; {d1_fmt} &amp; {d2_fmt}</div>
-  <div class="sup-grid">{conlan_card}{stokoe_card}</div>
+def delta_days(a, b):
+    if not a or not b:
+        return None
+    return round((_parse(b) - _parse(a)).total_seconds() / 86400, 2)
 
-  <div class="section-title">Rolling data &mdash; {cr['window_label']}</div>
-  <div class="rolling-grid">{conlan_roll}{stokoe_roll}</div>
 
-  <div class="section-title">Analysis &amp; talking points</div>
-  {analysis_html}
+def build_context_live():
+    token = _access_token()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
+    now_iso = datetime.now(timezone.utc).isoformat()
 
-  <div class="footer">
-    <span>Source: Zoho CRM &middot; Accounts + Submissions modules &middot; auto-generated &middot; <strong>Updated: {now_pt}</strong></span>
-    <span>{d1_fmt} &amp; {d2_fmt} &middot; Rolling: {cr['window_label']}</span>
-  </div>
+    # Lead side — the anchor defines our universe (leads each rep pushed).
+    sent = _earliest(fetch_lead_transitions(token, ANCHOR_MOVED_TO, cutoff), "Full_Name")
+    bank = _earliest(fetch_lead_transitions(token, APP_IN_BANK, cutoff), "Full_Name")
+    leads = fetch_records(token, "Leads",
+                          ["id", "Company", "Last_Name", "Owner"], sent.keys())
 
-</div>
-</body>
-</html>"""
+    # Deal side — underwriting + decision transitions.
+    uw = _earliest(fetch_deal_transitions(token, UW_STIPS, cutoff), "Potential_Name")
+    decision = {}
+    for stage in DECISION_STAGES:
+        for pid, t in _earliest(fetch_deal_transitions(token, stage, cutoff),
+                                "Potential_Name").items():
+            if pid not in decision or _parse(t) < _parse(decision[pid][0]):
+                decision[pid] = (t, stage)
+    deals = fetch_records(token, "Deals",
+                          ["id", "Deal_Name", "Owner", "Stage", "Amount", "UDW_Notes"],
+                          set(uw) | set(decision))
 
-# ── ROLLING DATA ─────────────────────────────────────────────────────────────
-def compute_rolling(token, team_set, window_days=30):
-    """Pull last ~30 business days of account data for a team."""
-    today = date.fromisoformat(today_pt())
-    bdays = []
-    d = today - timedelta(days=1)
-    while len(bdays) < window_days:
-        if d.weekday() < 5:
-            bdays.append(str(d))
-        d -= timedelta(days=1)
-    bdays.reverse()
+    state = update_udw_snapshot(load_state(), deals, now_iso)
+    save_state(state)
 
-    start_utc = f"{bdays[0]}T00:00:00+00:00"
-    end_utc   = f"{str(date.fromisoformat(bdays[-1]) + timedelta(days=1))}T00:00:00+00:00"
-    records = zoho_coql(token,
-        f"SELECT Owner, Created_Time FROM Accounts "
-        f"WHERE Created_Time >= '{start_utc}' "
-        f"AND Created_Time < '{end_utc}'"
-    )
+    # Link lead -> deal by normalized merchant name (Converted_Deal is empty in
+    # this org). This is the one spot to tune if naming diverges.
+    deal_by_name = {_norm(d.get("Deal_Name")): did for did, d in deals.items()}
 
-    # Bucket by date and owner
-    day_rep_counts = defaultdict(lambda: defaultdict(int))
-    for r in records:
-        owner = r.get("Owner", {}).get("name", "")
-        ct = r.get("Created_Time", "")[:10]
-        if owner in team_set and ct in bdays:
-            day_rep_counts[ct][owner] += 1
-
-    # Per-rep rolling averages
-    rep_avgs = {}
-    for last in team_set:
-        total = sum(day_rep_counts[d].get(last, 0) for d in bdays)
-        rep_avgs[last] = total / len(bdays)
-
-    # Team-level
-    all_rep_days = [(last, day_rep_counts[d].get(last, 0)) for d in bdays for last in team_set]
-    team_avg = sum(v for _, v in all_rep_days) / len(all_rep_days)
-    pct_goal = sum(1 for _, v in all_rep_days if v >= 3) / len(all_rep_days) * 100
-
-    sorted_reps = sorted(rep_avgs.items(), key=lambda x: -x[1])
-    top3 = [(REP_LAST_TO_FULL[l], v) for l, v in sorted_reps[:3]]
-    bot3 = [(REP_LAST_TO_FULL[l], v) for l, v in sorted_reps[-3:]]
-
-    window_label = f"{fmt_day(bdays[0])} &ndash; {fmt_day(bdays[-1])} ({len(bdays)} bdays)"
-
-    return {
-        "n_days": len(bdays), "n_reps": len(team_set),
-        "avg_a": team_avg, "pct_goal": pct_goal,
-        "top3": top3, "bot3": bot3,
-        "window_label": window_label,
-    }
-
-# ── MAIN ─────────────────────────────────────────────────────────────────────
-def main():
-    print("Getting Zoho access token...")
-    token = get_access_token()
-    print(f"  Access token obtained (ends: ...{token[-6:]})")
-    d1, d2 = last_two_business_days()
-    print(f"Report period: {d1} and {d2} (Pacific time)")
-
-    print("Pulling calls...")
-    calls_d1 = pull_calls(token, d1)
-    calls_d2 = pull_calls(token, d2)
-
-    print("Pulling accounts...")
-    accts_d1 = pull_accounts(token, d1)
-    accts_d2 = pull_accounts(token, d2)
-
-    print("Pulling approvals...")
-    apprvs_d1 = pull_approvals(token, d1)
-    apprvs_d2 = pull_approvals(token, d2)
-
-    print("Pulling speed to lead...")
-    s2l_d1 = pull_speed_to_lead(token, d1)
-    s2l_d2 = pull_speed_to_lead(token, d2)
-
-    print("Pulling rolling data...")
-    conlan_rolling = compute_rolling(token, CONLAN)
-    stokoe_rolling = compute_rolling(token, STOKOE)
-
-    # Build rows
     rows = []
-    for last, name in sorted(REP_LAST_TO_FULL.items(), key=lambda x: x[1]):
-        c1, dur1 = calls_d1[last]
-        c2, dur2 = calls_d2[last]
-        a1 = accts_d1.get(last, 0);  a2 = accts_d2.get(last, 0)
-        ap1 = apprvs_d1.get(last, 0); ap2 = apprvs_d2.get(last, 0)
-        ac = (c1 + c2) / 2;  ad = (dur1 + dur2) / 2
-        adl = (a1 + a2) / 2; apd = (ap1 + ap2) / 2
-        s2l_vals = [v for v in [s2l_d1.get(last), s2l_d2.get(last)] if v is not None]
-        s2l_avg  = round(sum(s2l_vals)/len(s2l_vals), 1) if s2l_vals else None
-        pts, reason = score(ac, ad, adl)
-        rows.append({"name": name, "last": last, "ac": ac, "ad": ad,
-                     "adl": adl, "apd": apd, "pts": pts, "reason": reason, "s2l": s2l_avg})
+    for lid, anchor_t in sent.items():
+        lead = leads.get(lid, {})
+        owner = (lead.get("Owner") or {}).get("id")
+        if owner not in REP_IDS:
+            continue
+        name = lead.get("Company") or lead.get("Last_Name") or "(unnamed lead)"
+        did = deal_by_name.get(_norm(lead.get("Company") or lead.get("Last_Name")))
+        d = deals.get(did, {}) if did else {}
+        udw_first = state.get(did) if did else None
+        dec = decision.get(did) if did else None
+        rows.append({
+            "rep": ID_TO_REP.get(owner, "?"),
+            "merchant": d.get("Deal_Name") or name,
+            "amount": d.get("Amount"),
+            "stage": d.get("Stage") or "Lead",
+            "has_note": bool((d.get("UDW_Notes") or "").strip()),
+            "S1": delta_days(anchor_t, bank.get(lid)),
+            "S2": delta_days(bank.get(lid), udw_first),
+            "S3": delta_days(udw_first, uw.get(did) if did else None),
+            "S4": delta_days(uw.get(did) if did else None, dec[0] if dec else None),
+            "decision": dec[1] if dec else None,
+        })
+    return assemble(rows, now_iso, mode="live")
 
-    # Team stats
-    def team_stats(team_set, rows, d1_apprvs, d2_apprvs):
-        tr = [r for r in rows if r["last"] in team_set]
-        n = len(tr)
-        return {
-            "n": n,
-            "grn": sum(r["pts"]==1 for r in tr),
-            "ylw": sum(r["pts"]==2 for r in tr),
-            "red": sum(r["pts"]==3 for r in tr),
-            "avg_a":  sum(r["adl"] for r in tr) / n,
-            "avg_ap": sum(r["apd"] for r in tr) / n,
-            "pct_goal": sum(r["adl"] >= 3 for r in tr) / n * 100,
-            "tot_ap_d1": sum(d1_apprvs.get(l, 0) for l in team_set),
-            "tot_ap_d2": sum(d2_apprvs.get(l, 0) for l in team_set),
-        }
 
-    conlan_stats = team_stats(CONLAN, rows, apprvs_d1, apprvs_d2)
-    stokoe_stats = team_stats(STOKOE, rows, apprvs_d1, apprvs_d2)
+def assemble(rows, now_iso, mode):
+    by_rep = {name: [] for name in REPS}
+    for r in rows:
+        by_rep.setdefault(r["rep"], []).append(r)
+    reps = []
+    for name, deals in by_rep.items():
+        s4s = [d["S4"] for d in deals if d["S4"] is not None]
+        stalls = sum(1 for d in deals
+                     if d["S4"] is not None and speed("S4", d["S4"]) == "slow")
+        reps.append({
+            "name": name,
+            "deals": sorted(deals, key=lambda d: (d["S4"] is None, -(d["S4"] or 0))),
+            "n": len(deals),
+            "median_s4": round(statistics.median(s4s), 1) if s4s else None,
+            "worst_s4": max(s4s) if s4s else None,
+            "stalls": stalls,
+        })
+    reps.sort(key=lambda r: (-(r["stalls"]), -((r["median_s4"] or 0))))
+    return {"reps": reps, "generated": now_iso, "mode": mode}
 
-    data = {
-        "rows": rows,
-        "conlan_stats": conlan_stats,
-        "stokoe_stats": stokoe_stats,
-        "conlan_rolling": conlan_rolling,
-        "stokoe_rolling": stokoe_rolling,
-        "org_tot_ap_d1": sum(apprvs_d1.values()),
-        "org_tot_ap_d2": sum(apprvs_d2.values()),
-    }
+# ----------------------------------------------------------------------------
+# RENDER
+# ----------------------------------------------------------------------------
+import html as _html
 
-    print("Generating HTML...")
-    # Build team_stats dicts for analysis
-    def _tstats_for_analysis(team_set):
-        tr = [r for r in rows if r["last"] in team_set]
-        n  = len(tr)
-        return {
-            "avg_a":    sum(r["adl"] for r in tr)/n if n else 0,
-            "avg_ap":   sum(r["apd"] for r in tr)/n if n else 0,
-            "pct_goal": sum(r["adl"]>=3 for r in tr)/n*100 if n else 0,
-            "grn": sum(r["pts"]==1 for r in tr),
-            "ylw": sum(r["pts"]==2 for r in tr),
-            "red": sum(r["pts"]==3 for r in tr),
-        }
-    team_stats_cur = {"conlan": _tstats_for_analysis(CONLAN), "stokoe": _tstats_for_analysis(STOKOE)}
-    analysis_html = generate_analysis(
-        rows=rows, prev_rows=None,
-        team_stats_cur=team_stats_cur, team_stats_prev=None,
-        d1=d1, d2=d2,
-        rolling_c=data["conlan_rolling"], rolling_s=data["stokoe_rolling"],
-        fmt_day=fmt_day, REP_LAST_TO_FULL=REP_LAST_TO_FULL,
-        CONLAN=CONLAN, STOKOE=STOKOE, scoring_system="1-3"
-    )
-    html = generate_html(d1, d2, data, analysis_html=analysis_html)
+SEG_LABELS = {
+    "S1": "Sent App \u2192 App in Bank",
+    "S2": "App in Bank \u2192 UDW Note",
+    "S3": "UDW Note \u2192 UW / Stips",
+    "S4": "UW / Stips \u2192 Decision",
+}
 
-    # Save locally
-    with open("report.html", "w", encoding="utf-8") as f:
-        f.write(html)
-    print("Saved report.html")
+def _fmt_days(v):
+    if v is None: return "\u2014"
+    if v < 1:     return f"{v*24:.0f}h"
+    return f"{v:.1f}d"
 
-    # Upload to tiiny.host — API requires a zip containing index.html
-    print("Uploading to tiiny.host...")
-    import io, zipfile
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("index.html", html.encode("utf-8"))
-    zip_buffer.seek(0)
+def _fmt_amount(a):
+    return "" if a in (None, 0) else f"${a:,.0f}"
 
-    r = requests.put(
-        "https://ext.tiiny.host/v1/upload",
-        headers={"x-api-key": TIINY_API_KEY},
-        files={"files": ("report.zip", zip_buffer, "application/zip")},
-        data={"domain": f"{TIINY_DOMAIN}.tiiny.site"},
-    )
+def _seg_cell(seg_key, value):
+    cls = speed(seg_key, value)
+    val = _fmt_days(value) if value is not None else "pending"
+    return (f'<div class="seg seg--{cls}"><span class="seg__k">{seg_key}</span>'
+            f'<span class="seg__v">{val}</span></div>')
+
+def _deal_row(d):
+    flag = ""
+    if d["S4"] is not None and speed("S4", d["S4"]) == "slow":
+        flag = '<span class="flag">UW stall</span>'
+    elif d["S4"] is not None and speed("S4", d["S4"]) == "watch":
+        flag = '<span class="flag flag--watch">watch</span>'
+    track = "".join(_seg_cell(k, d.get(k)) for k in ("S1", "S2", "S3", "S4"))
+    dec = d.get("decision") or d.get("stage") or ""
+    dec_cls = "ok" if dec == "Approved" else ("bad" if dec == "Declined" else "neutral")
+    return f"""
+    <div class="row">
+      <div class="row__id"><span class="merchant">{_html.escape(str(d['merchant']))}</span>
+        <span class="amt">{_fmt_amount(d.get('amount'))}</span></div>
+      <div class="track">{track}</div>
+      <div class="row__end"><span class="stage stage--{dec_cls}">{_html.escape(dec)}</span>{flag}</div>
+    </div>"""
+
+def _rep_card(rep):
+    stall_cls = "metric__v--bad" if rep["stalls"] else ""
+    rows = "".join(_deal_row(d) for d in rep["deals"]) or \
+           '<div class="empty">No leads at Sent App to Merchant in the window.</div>'
+    flagged = "rep--flagged" if rep["stalls"] else ""
+    return f"""
+    <section class="rep {flagged}" data-stalls="{rep['stalls']}" data-name="{_html.escape(rep['name'])}">
+      <header class="rep__head"><h2 class="rep__name">{_html.escape(rep['name'])}</h2>
+        <div class="rep__metrics">
+          <div class="metric"><span class="metric__k">Deals</span><span class="metric__v">{rep['n']}</span></div>
+          <div class="metric"><span class="metric__k">Median UW\u2192Decision</span><span class="metric__v">{_fmt_days(rep['median_s4'])}</span></div>
+          <div class="metric"><span class="metric__k">Worst</span><span class="metric__v">{_fmt_days(rep['worst_s4'])}</span></div>
+          <div class="metric"><span class="metric__k">Stalls</span><span class="metric__v {stall_cls}">{rep['stalls']}</span></div>
+        </div></header>
+      <div class="rep__rows">{rows}</div>
+    </section>"""
+
+def render_html(ctx) -> str:
+    gen = _parse(ctx["generated"]).astimezone().strftime("%b %-d, %Y \u00b7 %-I:%M %p")
+    banner = "" if ctx["mode"] == "live" else (
+        '<div class="banner">Sample view \u2014 real UW\u2192Decision history for 8 deals. '
+        'S1\u2013S3 populate on the scheduled run (S2/S3 accrue forward from first snapshot).</div>')
+    cards = "".join(_rep_card(r) for r in ctx["reps"])
+    legend = "".join(f'<span class="lg"><b>{k}</b> {v}</span>' for k, v in SEG_LABELS.items())
+    return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Underwriting Velocity \u2014 Rep Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  :root{{--bg:#e8ecef;--surface:#fff;--ink:#14181c;--muted:#646e78;--line:#dce2e7;
+    --teal:#0c6b63;--fast:#1f9d57;--watch:#c4790a;--slow:#d23b3b;--pending:#9aa6b0;}}
+  *{{box-sizing:border-box}}
+  body{{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,system-ui,sans-serif;
+    font-size:14px;line-height:1.45;padding:28px 22px 60px}}
+  .wrap{{max-width:1080px;margin:0 auto}}
+  .top{{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;flex-wrap:wrap;
+    border-bottom:2px solid var(--ink);padding-bottom:16px}}
+  .eyebrow{{font:600 11px/1 'IBM Plex Mono',monospace;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--teal);margin:0 0 8px}}
+  h1{{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:34px;line-height:1.02;
+    letter-spacing:-.01em;margin:0}}
+  .sub{{color:var(--muted);margin-top:8px;font-size:13px}} .sub b{{color:var(--ink);font-weight:600}}
+  .gen{{font:500 11px/1.4 'IBM Plex Mono',monospace;color:var(--muted);text-align:right}}
+  .controls{{display:flex;gap:8px;margin-top:10px;justify-content:flex-end}}
+  .ctl{{font:600 11px/1 'IBM Plex Mono',monospace;letter-spacing:.04em;text-transform:uppercase;
+    border:1px solid var(--line);background:var(--surface);color:var(--muted);padding:7px 11px;
+    border-radius:6px;cursor:pointer}}
+  .ctl.on{{border-color:var(--ink);color:var(--ink)}}
+  .legend{{display:flex;flex-wrap:wrap;gap:6px 16px;margin:16px 0 22px;
+    font:500 11.5px/1.3 'IBM Plex Mono',monospace;color:var(--muted)}}
+  .lg b{{color:var(--ink);margin-right:5px}}
+  .banner{{background:#fff7e6;border:1px solid #f0d79a;color:#7a5a16;padding:10px 14px;
+    border-radius:8px;font-size:12.5px;margin:18px 0 6px}}
+  .rep{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-top:14px}}
+  .rep--flagged{{border-left:4px solid var(--slow)}}
+  .rep__head{{display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap;
+    padding-bottom:14px;border-bottom:1px solid var(--line)}}
+  .rep__name{{font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:19px;margin:0}}
+  .rep__metrics{{display:flex;gap:22px;flex-wrap:wrap}}
+  .metric{{display:flex;flex-direction:column;align-items:flex-end}}
+  .metric__k{{font:500 10px/1.2 'IBM Plex Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}}
+  .metric__v{{font:600 17px/1.1 'IBM Plex Mono',monospace;margin-top:3px}}
+  .metric__v--bad{{color:var(--slow)}}
+  .rep__rows{{margin-top:6px}}
+  .row{{display:grid;grid-template-columns:minmax(150px,1.1fr) minmax(280px,2fr) minmax(120px,.8fr);
+    gap:16px;align-items:center;padding:11px 0;border-bottom:1px solid #eef2f4}}
+  .row:last-child{{border-bottom:none}}
+  .row__id{{display:flex;flex-direction:column;gap:2px;min-width:0}}
+  .merchant{{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+  .amt{{font:500 11px/1 'IBM Plex Mono',monospace;color:var(--muted)}}
+  .track{{display:grid;grid-template-columns:repeat(4,1fr);gap:5px}}
+  .seg{{border-radius:6px;padding:7px 6px;display:flex;flex-direction:column;align-items:center;gap:3px;
+    border:1px solid transparent;min-width:0}}
+  .seg__k{{font:600 9px/1 'IBM Plex Mono',monospace;letter-spacing:.08em;opacity:.7}}
+  .seg__v{{font:600 13px/1 'IBM Plex Mono',monospace}}
+  .seg--fast{{background:#e6f5ec;color:#0f6b38;border-color:#bfe3cd}}
+  .seg--watch{{background:#fbf0db;color:#8a5407;border-color:#f0d9ad}}
+  .seg--slow{{background:#fae3e3;color:#9e2424;border-color:#f0c3c3}}
+  .seg--pending{{background:repeating-linear-gradient(135deg,#f2f5f7,#f2f5f7 5px,#eaeef1 5px,#eaeef1 10px);
+    color:var(--pending);border-color:#e3e9ed}}
+  .seg--pending .seg__v{{font-size:10px;letter-spacing:.03em}}
+  .row__end{{display:flex;align-items:center;gap:8px;justify-content:flex-end;flex-wrap:wrap}}
+  .stage{{font:600 11px/1 'IBM Plex Mono',monospace;padding:5px 9px;border-radius:999px;border:1px solid var(--line)}}
+  .stage--ok{{background:#e6f5ec;color:#0f6b38;border-color:#bfe3cd}}
+  .stage--bad{{background:#fae3e3;color:#9e2424;border-color:#f0c3c3}}
+  .stage--neutral{{background:#eef2f4;color:var(--muted)}}
+  .flag{{font:700 10px/1 'IBM Plex Mono',monospace;letter-spacing:.04em;text-transform:uppercase;color:#fff;
+    background:var(--slow);padding:5px 8px;border-radius:5px}}
+  .flag--watch{{background:var(--watch)}}
+  .empty{{color:var(--muted);padding:14px 0;font-size:13px}}
+  .foot{{margin-top:30px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);
+    font-size:12px;line-height:1.6;max-width:760px}} .foot b{{color:var(--ink)}}
+  @media (max-width:720px){{.row{{grid-template-columns:1fr;gap:9px}}.row__end{{justify-content:flex-start}}h1{{font-size:27px}}}}
+</style></head>
+<body><div class="wrap">
+  <div class="top"><div>
+    <p class="eyebrow">Management Monitor \u00b7 Confidential</p>
+    <h1>Underwriting Velocity</h1>
+    <p class="sub">Clock starts when a rep moves a lead to <b>Sent App to Merchant</b>.
+      Tracking <b>{len(REPS)} reps</b> through to approval / decline. Struggling reps surface first.</p>
+  </div><div>
+    <p class="gen">Generated<br>{gen}</p>
+    <div class="controls"><button class="ctl" id="flagBtn">Flagged only</button>
+      <button class="ctl" id="sortBtn">Sort: stalls</button></div>
+  </div></div>
+  <div class="legend">{legend}</div>
+  {banner}
+  <div id="reps">{cards}</div>
+  <div class="foot"><b>How to read this.</b> Each deal is one row; the four cells are time spent in each
+    funnel segment, colored by speed. <b>S1</b> and <b>S4</b> come from CRM status history. <b>S2</b> and
+    <b>S3</b> depend on when UDW Notes first gets a value \u2014 a field CRM does not history-track \u2014 so they
+    accrue forward from the first scheduled run and read <i>pending</i> until then. Edit the roster at the
+    top of the script; the dashboard rebuilds around whoever is listed.</div>
+</div>
+<script>
+  var flagOnly=false, sortMode='stalls', box=document.getElementById('reps');
+  function apply(){{
+    var c=[].slice.call(box.querySelectorAll('.rep'));
+    c.forEach(function(x){{x.style.display=(flagOnly&&x.dataset.stalls==='0')?'none':'';}});
+    c.sort(function(a,b){{return sortMode==='name'?a.dataset.name.localeCompare(b.dataset.name):(+b.dataset.stalls)-(+a.dataset.stalls);}});
+    c.forEach(function(x){{box.appendChild(x);}});
+  }}
+  document.getElementById('flagBtn').onclick=function(){{flagOnly=!flagOnly;this.classList.toggle('on',flagOnly);apply();}};
+  document.getElementById('sortBtn').onclick=function(){{sortMode=(sortMode==='stalls')?'name':'stalls';this.textContent='Sort: '+sortMode;apply();}};
+</script>
+</body></html>"""
+
+# ----------------------------------------------------------------------------
+# UPLOAD  (same proven tiiny.host path as the other reports)
+# ----------------------------------------------------------------------------
+
+def upload(html_str):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("index.html", html_str.encode("utf-8"))
+    buf.seek(0)
+    r = requests.put("https://ext.tiiny.host/v1/upload",
+                     headers={"x-api-key": os.environ["TIINY_API_KEY"]},
+                     files={"files": ("report.zip", buf, "application/zip")},
+                     data={"domain": f"{TIINY_DOMAIN}.tiiny.site"}, timeout=60)
     if r.status_code == 200:
-        print(f"✅ Report live at https://{TIINY_DOMAIN}.tiiny.site/")
+        print(f"Live at https://{TIINY_DOMAIN}.tiiny.site/")
     else:
-        print(f"❌ tiiny upload failed: {r.status_code} {r.text}")
+        print(f"tiiny upload failed: {r.status_code} {r.text}")
         sys.exit(1)
+
+# ----------------------------------------------------------------------------
+# DEMO  (bundled REAL sample pulled from CRM on build day)
+# ----------------------------------------------------------------------------
+
+SAMPLE = [
+    ("Rockwell","Nathan Wilkie",30000,"2026-04-22T10:57:19-07:00","2026-06-01T13:30:04-07:00","Approved",True),
+    ("TG Deals LLC","Jordan Koestner",15000,"2026-05-15T06:38:18-07:00","2026-05-29T11:49:42-07:00","Approved",True),
+    ("Exp Lyft LLC","Richard McCausland",15000,"2026-05-22T13:56:53-07:00","2026-06-01T07:38:00-07:00","Approved",True),
+    ("Cars R Us","Richard McCausland",100000,"2026-05-27T09:23:29-07:00","2026-06-02T10:16:32-07:00","Approved",True),
+    ("Lynette Escobar Tiling","Nathan Wilkie",15000,"2026-05-27T10:19:24-07:00","2026-05-29T14:54:10-07:00","Approved",True),
+    ("Be Good Organix LLC","Richard McCausland",20000,"2026-06-04T07:34:37-07:00","2026-06-05T10:43:38-07:00","Approved",True),
+    ("AV Home Innovations LLC","Richard McCausland",None,"2026-06-02T09:18:18-07:00","2026-06-03T10:07:00-07:00","Approved",False),
+    ("Discovery Water Management LLC.","Jordan Koestner",25000,"2026-05-28T16:31:14-07:00","2026-05-29T11:05:18-07:00","Approved",True),
+]
+
+def build_context_demo():
+    rows = [{"rep": rep, "merchant": m, "amount": amt, "stage": dec, "has_note": note,
+             "decision": dec, "S1": None, "S2": None, "S3": None,
+             "S4": delta_days(uw, dec_t)}
+            for m, rep, amt, uw, dec_t, dec, note in SAMPLE]
+    return assemble(rows, datetime.now(timezone.utc).isoformat(), mode="demo")
+
+# ----------------------------------------------------------------------------
+# MAIN
+# ----------------------------------------------------------------------------
+
+def main():
+    demo = "--demo" in sys.argv
+    ctx = build_context_demo() if demo else build_context_live()
+    html_str = render_html(ctx)
+    with open(OUTPUT_FILE, "w") as f:
+        f.write(html_str)
+    print(f"Wrote {OUTPUT_FILE} "
+          f"({sum(len(r['deals']) for r in ctx['reps'])} deals / {len(ctx['reps'])} reps).")
+    if not demo:
+        upload(html_str)
 
 if __name__ == "__main__":
     main()

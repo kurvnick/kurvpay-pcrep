@@ -226,11 +226,18 @@ def build_context_live():
     state = update_udw_snapshot(load_state(), deals, now_iso)
     save_state(state)
 
-    # Link lead -> deal by normalized merchant name (Converted_Deal is empty in
-    # this org). This is the one spot to tune if naming diverges.
-    deal_by_name = {_norm(d.get("Deal_Name")): did for did, d in deals.items()}
+    # Match leads to deals by normalized merchant name (Converted_Deal is empty
+    # in this org). Unmatched deals still render on their own (section B) so
+    # underwriting history is never hidden.
+    deal_by_name = {}
+    for did, d in deals.items():
+        n = _norm(d.get("Deal_Name"))
+        if n:
+            deal_by_name.setdefault(n, did)
 
-    rows = []
+    rows, used = [], set()
+
+    # (A) Lead-anchored rows: every app a rep pushed to Sent App to Merchant.
     for lid, anchor_t in sent.items():
         lead = leads.get(lid, {})
         owner = (lead.get("Owner") or {}).get("id")
@@ -238,11 +245,13 @@ def build_context_live():
             continue
         name = lead.get("Company") or lead.get("Last_Name") or "(unnamed lead)"
         did = deal_by_name.get(_norm(lead.get("Company") or lead.get("Last_Name")))
+        if did:
+            used.add(did)
         d = deals.get(did, {}) if did else {}
         udw_first = state.get(did) if did else None
         dec = decision.get(did) if did else None
         rows.append({
-            "rep": ID_TO_REP.get(owner, "?"),
+            "rep": ID_TO_REP[owner],
             "merchant": d.get("Deal_Name") or name,
             "amount": d.get("Amount"),
             "stage": d.get("Stage") or "Lead",
@@ -253,6 +262,31 @@ def build_context_live():
             "S4": delta_days(uw.get(did) if did else None, dec[0] if dec else None),
             "decision": dec[1] if dec else None,
         })
+
+    # (B) Deal-only rows: underwriting deals not tied to a tracked lead (Sent App
+    # predates the lookback, or the name didn't match). Attributed by the deal's
+    # own Owner so S3/S4 history always surfaces.
+    for did, d in deals.items():
+        if did in used:
+            continue
+        owner = (d.get("Owner") or {}).get("id")
+        if owner not in REP_IDS:
+            continue
+        udw_first = state.get(did)
+        dec = decision.get(did)
+        rows.append({
+            "rep": ID_TO_REP[owner],
+            "merchant": d.get("Deal_Name") or "(deal)",
+            "amount": d.get("Amount"),
+            "stage": d.get("Stage") or "",
+            "has_note": bool((d.get("UDW_Notes") or "").strip()),
+            "S1": None,
+            "S2": None,
+            "S3": delta_days(udw_first, uw.get(did)),
+            "S4": delta_days(uw.get(did), dec[0] if dec else None),
+            "decision": dec[1] if dec else None,
+        })
+
     return assemble(rows, now_iso, mode="live")
 
 

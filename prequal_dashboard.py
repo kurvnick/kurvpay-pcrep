@@ -43,21 +43,29 @@ REPS = {
     "Samuel Bender":      "1429371000646655001",
 }
 
-ANCHOR_MOVED_TO = "Sent App to Merchant"   # lead status that starts the clock
-APP_IN_BANK     = "App in Bank"            # lead status, end of S1
-UW_STIPS        = "UW / Stips Needed"      # deal stage, end of S3 / start of S4
-DECISION_STAGES = ["Approved", "Declined"] # deal stages, end of S4
+PREQUAL_STATUS = "Pre-Qualification Received"  # step 1 anchor (clock starts here)
+SENT_STATUS    = "Sent App to Merchant"        # lead status
+BANK_STATUS    = "App in Bank"                 # lead status
+UW_STIPS       = "UW / Stips Needed"           # deal stage
+APPROVED       = "Approved"                    # deal stage  (EXCLUDED from view)
+DECLINED       = "Declined"                    # deal stage  (kept, closed)
 
-THRESHOLDS = {                              # (fast_max, watch_max) in DAYS
-    "S1": (1.0, 3.0),
-    "S2": (0.5, 2.0),
+# Funnel segments and their (fast_max, watch_max) thresholds in DAYS:
+#   S1 Pre-Qual Received -> Sent App      S2 Sent App -> App in Bank
+#   S3 App in Bank -> UDW Note            S4 UDW Note -> UW / Stips
+#   S5 UW / Stips -> Decision (open while in-flight)
+THRESHOLDS = {
+    "S1": (2.0, 5.0),
+    "S2": (1.0, 3.0),
     "S3": (1.0, 3.0),
-    "S4": (2.0, 7.0),
+    "S4": (1.0, 3.0),
+    "S5": (2.0, 7.0),
 }
+SEG_KEYS = ["S1", "S2", "S3", "S4", "S5"]
 
-LOOKBACK_DAYS = 120          # how far back to FETCH transitions (keep generous so
-                             # long-cycle deals decided recently still resolve)
-ACTIVE_WINDOW_DAYS = 30      # only DISPLAY rows with funnel activity in this window
+LOOKBACK_DAYS = 120          # how far back to FETCH transitions
+BASELINE_CLEAN_DAYS = 45     # FIRST RUN ONLY: drop items with no activity in the
+                             # last 45 days. Persisted, so later runs never re-trim.
 DISPLAY_TZ    = ZoneInfo("America/Los_Angeles")   # all displayed times in PT
 STATE_FILE    = "udw_snapshot_state.json"
 OUTPUT_FILE   = "index.html"
@@ -168,25 +176,28 @@ def fetch_records(token, module, fields, ids):
     return out
 
 # ----------------------------------------------------------------------------
-# UDW SNAPSHOT STATE (forward-only capture of blank -> value)
+# STATE  (persisted across runs: one-time baseline + UDW blank->value snapshot)
 # ----------------------------------------------------------------------------
 
 def load_state():
     try:
         with open(STATE_FILE) as f:
-            return json.load(f)
+            s = json.load(f)
     except FileNotFoundError:
-        return {}
+        s = {}
+    s.setdefault("baseline_cutoff", None)   # set on first run, never changed
+    s.setdefault("udw", {})                 # deal_id -> first-seen-populated iso
+    return s
 
 def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
-def update_udw_snapshot(state, deals, now_iso):
+def update_udw_snapshot(udw_state, deals, now_iso):
     for did, d in deals.items():
-        if (d.get("UDW_Notes") or "").strip() and did not in state:
-            state[did] = now_iso
-    return state
+        if (d.get("UDW_Notes") or "").strip() and did not in udw_state:
+            udw_state[did] = now_iso
+    return udw_state
 
 # ----------------------------------------------------------------------------
 # COMPUTE
@@ -209,43 +220,63 @@ def _max_ts(*ts):
     return max(vals) if vals else None
 
 
+def compute_segments(prequal_t, sent_t, bank_t, udw_t, uw_t, declined_t, now_iso):
+    """Return (segs, open_key, open_age, is_open, last_event_ts).
+    Completed segments show their duration; the segment the deal is currently
+    sitting in shows its running age (still counting)."""
+    starts = {"S1": prequal_t, "S2": sent_t, "S3": bank_t, "S4": udw_t, "S5": uw_t}
+    segs = {
+        "S1": delta_days(prequal_t, sent_t),
+        "S2": delta_days(sent_t, bank_t),
+        "S3": delta_days(bank_t, udw_t),
+        "S4": delta_days(udw_t, uw_t),
+        "S5": delta_days(uw_t, declined_t) if declined_t else None,
+    }
+    if declined_t:                                  # closed
+        return segs, None, None, False, declined_t
+    last_key = last_t = None
+    for k in SEG_KEYS:                              # furthest milestone reached
+        if starts[k]:
+            last_key, last_t = k, starts[k]
+    if last_key:                                    # open: age of current segment
+        open_age = delta_days(last_t, now_iso)
+        segs[last_key] = open_age
+        return segs, last_key, open_age, True, last_t
+    return segs, None, None, True, None
+
+
 def build_context_live():
     token = _access_token()
     cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # Lead side — the anchor defines our universe (leads each rep pushed).
-    sent = _earliest(fetch_lead_transitions(token, ANCHOR_MOVED_TO, cutoff), "Full_Name")
-    bank = _earliest(fetch_lead_transitions(token, APP_IN_BANK, cutoff), "Full_Name")
+    # Lead-side milestones. Universe is anchored on Pre-Qualification Received.
+    prequal = _earliest(fetch_lead_transitions(token, PREQUAL_STATUS, cutoff), "Full_Name")
+    sent    = _earliest(fetch_lead_transitions(token, SENT_STATUS,    cutoff), "Full_Name")
+    bank    = _earliest(fetch_lead_transitions(token, BANK_STATUS,    cutoff), "Full_Name")
+    universe = set(prequal) | set(sent) | set(bank)
     leads = fetch_records(token, "Leads",
-                          ["id", "Company", "Last_Name", "Owner"], sent.keys())
+                          ["id", "Company", "Last_Name", "Owner", "Lead_Status"], universe)
 
-    # Deal side. Approvals are EXCLUDED entirely. Declines are kept (closed,
-    # shown with the time they took). Everything else still open is in-flight.
+    # Deal side. Approvals excluded; declines kept (closed).
     uw       = _earliest(fetch_deal_transitions(token, UW_STIPS, cutoff), "Potential_Name")
-    approved = _earliest(fetch_deal_transitions(token, "Approved", cutoff), "Potential_Name")
-    declined = _earliest(fetch_deal_transitions(token, "Declined", cutoff), "Potential_Name")
+    approved = _earliest(fetch_deal_transitions(token, APPROVED, cutoff), "Potential_Name")
+    declined = _earliest(fetch_deal_transitions(token, DECLINED, cutoff), "Potential_Name")
     approved_ids = set(approved)
-
     deals = fetch_records(token, "Deals",
                           ["id", "Deal_Name", "Owner", "Stage", "Amount", "UDW_Notes", "Created_Time"],
                           set(uw) | set(declined))
 
-    state = update_udw_snapshot(load_state(), deals, now_iso)
+    # State: set the one-time baseline on first run; capture UDW blank->value.
+    state = load_state()
+    if not state["baseline_cutoff"]:
+        state["baseline_cutoff"] = (datetime.now(timezone.utc)
+                                    - timedelta(days=BASELINE_CLEAN_DAYS)).isoformat()
+    baseline_cut = _parse(state["baseline_cutoff"])
+    update_udw_snapshot(state["udw"], deals, now_iso)
     save_state(state)
+    udw_state = state["udw"]
 
-    def deal_seg(did):
-        """(S4, decision, open?, last_event_ts) for a deal."""
-        uw_t = uw.get(did)
-        dec_t = declined.get(did)
-        if dec_t:                                    # closed: declined
-            return (delta_days(uw_t, dec_t) if uw_t else None, "Declined", False, dec_t)
-        if uw_t:                                     # open: still in underwriting
-            return (delta_days(uw_t, now_iso), None, True, uw_t)
-        return (None, None, False, None)
-
-    # Match leads to deals by normalized merchant name (Converted_Deal is empty
-    # in this org). Unmatched deals still render on their own (B).
     deal_by_name = {}
     for did, d in deals.items():
         n = _norm(d.get("Deal_Name"))
@@ -254,8 +285,8 @@ def build_context_live():
 
     rows, used = [], set()
 
-    # (A) Lead-anchored rows, EXCLUDING any whose deal was approved.
-    for lid, anchor_t in sent.items():
+    # (A) Lead-anchored rows (from Pre-Qual onward), EXCLUDING approved deals.
+    for lid in universe:
         lead = leads.get(lid, {})
         owner = (lead.get("Owner") or {}).get("id")
         if owner not in REP_IDS:
@@ -268,28 +299,29 @@ def build_context_live():
         if did:
             used.add(did)
         d = deals.get(did, {}) if did else {}
-        udw_first = state.get(did) if did else None
-        bank_t = bank.get(lid)
+        prequal_t, sent_t, bank_t = prequal.get(lid), sent.get(lid), bank.get(lid)
+        udw_t = udw_state.get(did) if did else None
         uw_t = uw.get(did) if did else None
-        s4, decision, is_open, dlast = deal_seg(did) if did else (None, None, False, None)
+        declined_t = declined.get(did) if did else None
+        segs, open_key, open_age, is_open, _ = compute_segments(
+            prequal_t, sent_t, bank_t, udw_t, uw_t, declined_t, now_iso)
+        status = ("Declined" if declined_t else
+                  (d.get("Stage") or lead.get("Lead_Status") or "Lead"))
         rows.append({
             "rep": ID_TO_REP[owner],
             "merchant": d.get("Deal_Name") or name,
             "amount": d.get("Amount"),
-            "stage": "Declined" if decision == "Declined" else (d.get("Stage") or "Lead"),
-            "has_note": bool((d.get("UDW_Notes") or "").strip()),
-            "submitted": d.get("Created_Time") or anchor_t,
-            "_last": _max_ts(anchor_t, bank_t, udw_first, uw_t, dlast),
-            "_open": is_open,
-            "S1": delta_days(anchor_t, bank_t),
-            "S2": delta_days(bank_t, udw_first),
-            "S3": delta_days(udw_first, uw_t),
-            "S4": s4,
-            "decision": decision,
+            "stage": status,
+            "submitted": d.get("Created_Time") or sent_t or prequal_t,
+            "decision": "Declined" if declined_t else None,
+            "_open": is_open, "_open_key": open_key, "_open_age": open_age,
+            "_last": _max_ts(prequal_t, sent_t, bank_t, udw_t, uw_t, declined_t,
+                             d.get("Created_Time")),
+            **segs,
         })
 
     # (B) Deal-only rows: in-UW or declined deals (never approved) not matched
-    # to a tracked lead. Attributed by the deal's own Owner.
+    # to a tracked lead. S1/S2 unknown (no lead link); attributed by deal Owner.
     for did in (set(uw) | set(declined)):
         if did in used or did in approved_ids:
             continue
@@ -297,30 +329,28 @@ def build_context_live():
         owner = (d.get("Owner") or {}).get("id")
         if owner not in REP_IDS:
             continue
-        udw_first = state.get(did)
+        udw_t = udw_state.get(did)
         uw_t = uw.get(did)
-        s4, decision, is_open, dlast = deal_seg(did)
+        declined_t = declined.get(did)
+        segs, open_key, open_age, is_open, _ = compute_segments(
+            None, None, None, udw_t, uw_t, declined_t, now_iso)
+        status = "Declined" if declined_t else (d.get("Stage") or "")
         rows.append({
             "rep": ID_TO_REP[owner],
             "merchant": d.get("Deal_Name") or "(deal)",
             "amount": d.get("Amount"),
-            "stage": "Declined" if decision == "Declined" else (d.get("Stage") or ""),
-            "has_note": bool((d.get("UDW_Notes") or "").strip()),
+            "stage": status,
             "submitted": d.get("Created_Time"),
-            "_last": _max_ts(d.get("Created_Time"), udw_first, uw_t, dlast),
-            "_open": is_open,
-            "S1": None,
-            "S2": None,
-            "S3": delta_days(udw_first, uw_t),
-            "S4": s4,
-            "decision": decision,
+            "decision": "Declined" if declined_t else None,
+            "_open": is_open, "_open_key": open_key, "_open_age": open_age,
+            "_last": _max_ts(d.get("Created_Time"), udw_t, uw_t, declined_t),
+            **segs,
         })
 
-    # Open deals always show (an old one = a live stall). Declines and stale
-    # early-funnel leads are pruned to recent activity by the active window.
-    active_cut = datetime.now(timezone.utc) - timedelta(days=ACTIVE_WINDOW_DAYS)
-    rows = [r for r in rows
-            if r["_open"] or (r["_last"] and r["_last"] >= active_cut)]
+    # One-time clean: drop anything with no activity since the persisted baseline
+    # (= 45 days before the first run). The cutoff is fixed, so later runs never
+    # re-trim and new/aging deals are always kept.
+    rows = [r for r in rows if r["_last"] and r["_last"] >= baseline_cut]
 
     return assemble(rows, now_iso, mode="live")
 
@@ -331,22 +361,23 @@ def assemble(rows, now_iso, mode):
         by_rep.setdefault(r["rep"], []).append(r)
     reps = []
     for name, deals in by_rep.items():
-        s4s = [d["S4"] for d in deals if d["S4"] is not None]
-        # a "stall" is an OPEN deal stuck in underwriting past the watch line;
-        # a declined deal is closed and doesn't count, even if it took a while.
+        ages = [d["_open_age"] for d in deals
+                if d.get("_open") and d.get("_open_age") is not None]
+        # a stall = an OPEN deal whose CURRENT segment has run past its watch line.
         stalls = sum(1 for d in deals
-                     if d.get("_open") and d["S4"] is not None
-                     and speed("S4", d["S4"]) == "slow")
+                     if d.get("_open") and d.get("_open_age") is not None
+                     and speed(d["_open_key"], d["_open_age"]) == "slow")
         reps.append({
             "name": name,
             "deals": sorted(deals, key=lambda d: (not d.get("_open"),
-                                                  d["S4"] is None, -(d["S4"] or 0))),
+                                                  -(d.get("_open_age") or 0))),
             "n": len(deals),
-            "median_s4": round(statistics.median(s4s), 1) if s4s else None,
-            "worst_s4": max(s4s) if s4s else None,
+            "open_n": sum(1 for d in deals if d.get("_open")),
+            "median_age": round(statistics.median(ages), 1) if ages else None,
+            "oldest": max(ages) if ages else None,
             "stalls": stalls,
         })
-    reps.sort(key=lambda r: (-(r["stalls"]), -((r["median_s4"] or 0))))
+    reps.sort(key=lambda r: (-(r["stalls"]), -((r["oldest"] or 0))))
     return {"reps": reps, "generated": now_iso, "mode": mode}
 
 # ----------------------------------------------------------------------------
@@ -355,10 +386,11 @@ def assemble(rows, now_iso, mode):
 import html as _html
 
 SEG_LABELS = {
-    "S1": "Sent App \u2192 App in Bank",
-    "S2": "App in Bank \u2192 UDW Note",
-    "S3": "UDW Note \u2192 UW / Stips",
-    "S4": "Time in UW / Stips",
+    "S1": "Pre-Qual \u2192 Sent App",
+    "S2": "Sent App \u2192 App in Bank",
+    "S3": "App in Bank \u2192 UDW Note",
+    "S4": "UDW Note \u2192 UW / Stips",
+    "S5": "UW / Stips \u2192 Decision",
 }
 
 def _fmt_days(v):
@@ -377,19 +409,23 @@ def _fmt_date(iso):
     except Exception:
         return ""
 
-def _seg_cell(seg_key, value):
+def _seg_cell(seg_key, value, is_open=False):
     cls = speed(seg_key, value)
     val = _fmt_days(value) if value is not None else "pending"
-    return (f'<div class="seg seg--{cls}"><span class="seg__k">{seg_key}</span>'
+    open_cls = " seg--open" if is_open else ""
+    return (f'<div class="seg seg--{cls}{open_cls}"><span class="seg__k">{seg_key}</span>'
             f'<span class="seg__v">{val}</span></div>')
 
 def _deal_row(d):
     flag = ""
-    if d.get("_open") and d["S4"] is not None and speed("S4", d["S4"]) == "slow":
-        flag = '<span class="flag">UW stall</span>'
-    elif d.get("_open") and d["S4"] is not None and speed("S4", d["S4"]) == "watch":
-        flag = '<span class="flag flag--watch">watch</span>'
-    track = "".join(_seg_cell(k, d.get(k)) for k in ("S1", "S2", "S3", "S4"))
+    if d.get("_open") and d.get("_open_age") is not None:
+        sp = speed(d["_open_key"], d["_open_age"])
+        if sp == "slow":
+            flag = '<span class="flag">STALL</span>'
+        elif sp == "watch":
+            flag = '<span class="flag flag--watch">watch</span>'
+    track = "".join(_seg_cell(k, d.get(k), is_open=(d.get("_open_key") == k))
+                    for k in SEG_KEYS)
     dec = d.get("decision") or d.get("stage") or ""
     dec_cls = "ok" if dec == "Approved" else ("bad" if dec == "Declined" else "neutral")
     sub = _fmt_date(d.get("submitted"))
@@ -412,9 +448,9 @@ def _rep_card(rep):
     <section class="rep {flagged}" data-stalls="{rep['stalls']}" data-name="{_html.escape(rep['name'])}">
       <header class="rep__head"><h2 class="rep__name">{_html.escape(rep['name'])}</h2>
         <div class="rep__metrics">
-          <div class="metric"><span class="metric__k">In-flight</span><span class="metric__v">{rep['n']}</span></div>
-          <div class="metric"><span class="metric__k">Median days in UW</span><span class="metric__v">{_fmt_days(rep['median_s4'])}</span></div>
-          <div class="metric"><span class="metric__k">Oldest</span><span class="metric__v">{_fmt_days(rep['worst_s4'])}</span></div>
+          <div class="metric"><span class="metric__k">In-flight</span><span class="metric__v">{rep['open_n']}</span></div>
+          <div class="metric"><span class="metric__k">Median wait</span><span class="metric__v">{_fmt_days(rep['median_age'])}</span></div>
+          <div class="metric"><span class="metric__k">Oldest</span><span class="metric__v">{_fmt_days(rep['oldest'])}</span></div>
           <div class="metric"><span class="metric__k">Stalls</span><span class="metric__v {stall_cls}">{rep['stalls']}</span></div>
         </div></header>
       <div class="rep__rows">{rows}</div>
@@ -423,8 +459,8 @@ def _rep_card(rep):
 def render_html(ctx) -> str:
     gen = _parse(ctx["generated"]).astimezone(DISPLAY_TZ).strftime("%b %-d, %Y \u00b7 %-I:%M %p PT")
     banner = "" if ctx["mode"] == "live" else (
-        '<div class="banner">Sample view \u2014 in-flight deals with real time-in-underwriting. '
-        'S1\u2013S3 populate on the scheduled run (S2/S3 accrue forward from first snapshot).</div>')
+        '<div class="banner">Sample view \u2014 illustrative deals across the funnel. The dashed cell '
+        '(\u25cf) is where each deal currently sits, still counting; solid cells are completed segments.</div>')
     cards = "".join(_rep_card(r) for r in ctx["reps"])
     legend = "".join(f'<span class="lg"><b>{k}</b> {v}</span>' for k, v in SEG_LABELS.items())
     return f"""<!doctype html>
@@ -470,13 +506,13 @@ def render_html(ctx) -> str:
   .metric__v{{font:600 17px/1.1 'IBM Plex Mono',monospace;margin-top:3px}}
   .metric__v--bad{{color:var(--slow)}}
   .rep__rows{{margin-top:6px}}
-  .row{{display:grid;grid-template-columns:minmax(150px,1.1fr) minmax(280px,2fr) minmax(120px,.8fr);
-    gap:16px;align-items:center;padding:11px 0;border-bottom:1px solid #eef2f4}}
+  .row{{display:grid;grid-template-columns:minmax(140px,1fr) minmax(330px,2.4fr) minmax(110px,.7fr);
+    gap:14px;align-items:center;padding:11px 0;border-bottom:1px solid #eef2f4}}
   .row:last-child{{border-bottom:none}}
   .row__id{{display:flex;flex-direction:column;gap:2px;min-width:0}}
   .merchant{{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
   .amt{{font:500 11px/1 'IBM Plex Mono',monospace;color:var(--muted)}}
-  .track{{display:grid;grid-template-columns:repeat(4,1fr);gap:5px}}
+  .track{{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}}
   .seg{{border-radius:6px;padding:7px 6px;display:flex;flex-direction:column;align-items:center;gap:3px;
     border:1px solid transparent;min-width:0}}
   .seg__k{{font:600 9px/1 'IBM Plex Mono',monospace;letter-spacing:.08em;opacity:.7}}
@@ -487,6 +523,8 @@ def render_html(ctx) -> str:
   .seg--pending{{background:repeating-linear-gradient(135deg,#f2f5f7,#f2f5f7 5px,#eaeef1 5px,#eaeef1 10px);
     color:var(--pending);border-color:#e3e9ed}}
   .seg--pending .seg__v{{font-size:10px;letter-spacing:.03em}}
+  .seg--open{{border-style:dashed;border-width:1.5px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.02)}}
+  .seg--open .seg__k::after{{content:" \\25CF";font-size:7px;vertical-align:middle}}
   .row__end{{display:flex;align-items:center;gap:8px;justify-content:flex-end;flex-wrap:wrap}}
   .stage{{font:600 11px/1 'IBM Plex Mono',monospace;padding:5px 9px;border-radius:999px;border:1px solid var(--line)}}
   .stage--ok{{background:#e6f5ec;color:#0f6b38;border-color:#bfe3cd}}
@@ -504,9 +542,9 @@ def render_html(ctx) -> str:
   <div class="top"><div>
     <p class="eyebrow">Management Monitor \u00b7 Confidential</p>
     <h1>Underwriting Velocity</h1>
-    <p class="sub">Clock starts when a rep moves a lead to <b>Sent App to Merchant</b>.
-      <b>In-flight deals plus recent declines</b> (approvals excluded), across <b>{len(REPS)} reps</b>.
-      Most stuck in underwriting surface first.</p>
+    <p class="sub">Clock starts when a lead hits <b>Pre-Qualification Received</b>, through five steps to
+      a decision. <b>In-flight deals plus recent declines</b> (approvals excluded), across <b>{len(REPS)} reps</b>.
+      Whatever's stuck longest in its current step surfaces first.</p>
   </div><div>
     <p class="gen">Generated<br>{gen}</p>
     <div class="controls"><button class="ctl" id="flagBtn">Flagged only</button>
@@ -515,13 +553,14 @@ def render_html(ctx) -> str:
   <div class="legend">{legend}</div>
   {banner}
   <div id="reps">{cards}</div>
-  <div class="foot"><b>How to read this.</b> Each row is an in-flight deal or a recent decline;
-    approvals are excluded. <b>S1</b>\u2013<b>S3</b> are completed segment times from CRM status history.
-    <b>S4</b> is time in UW / Stips \u2014 still counting for open deals (a red S4 is a live stall), or the
-    time it took to decline for closed ones. Stall flags and the stall count apply only to open deals;
-    declines show a red <i>Declined</i> chip. <b>S2</b>/<b>S3</b> depend on when UDW Notes first gets a
-    value, which CRM does not history-track, so they accrue forward from the first scheduled run and read
-    <i>pending</i> until then. Edit the roster at the top of the script to change who is tracked.</div>
+  <div class="foot"><b>How to read this.</b> Each row is an in-flight deal or a recent decline; approvals
+    are excluded. The five cells are the funnel steps from Pre-Qualification Received to a decision. Solid
+    cells are completed segments (green/amber/red by speed); the dashed cell (\u25cf) is the step the deal is
+    sitting in right now, still counting \u2014 that running time is what triggers a <b>STALL</b> flag and the
+    stall count. <b>S3</b>/<b>S4</b> depend on when UDW Notes first gets a value, which CRM does not
+    history-track, so they read <i>pending</i> until the snapshot captures it. The first run trims anything
+    with no activity in the prior 45 days; that baseline is then fixed, so later runs never re-trim. Edit
+    the roster or the 45-day baseline at the top of the script.</div>
 </div>
 <script>
   var flagOnly=false, sortMode='stalls', box=document.getElementById('reps');
@@ -556,34 +595,38 @@ def upload(html_str):
         sys.exit(1)
 
 # ----------------------------------------------------------------------------
-# DEMO  (bundled REAL sample pulled from CRM on build day)
+# DEMO  (illustrative deals exercising every stage of the funnel)
 # ----------------------------------------------------------------------------
 
-SAMPLE = [
-    ("Rockwell","Nathan Wilkie",30000,"2026-04-22T10:57:19-07:00","2026-06-01T13:30:04-07:00","Approved",True),
-    ("TG Deals LLC","Jordan Koestner",15000,"2026-05-15T06:38:18-07:00","2026-05-29T11:49:42-07:00","Approved",True),
-    ("Exp Lyft LLC","Richard McCausland",15000,"2026-05-22T13:56:53-07:00","2026-06-01T07:38:00-07:00","Approved",True),
-    ("Cars R Us","Richard McCausland",100000,"2026-05-27T09:23:29-07:00","2026-06-02T10:16:32-07:00","Approved",True),
-    ("Lynette Escobar Tiling","Nathan Wilkie",15000,"2026-05-27T10:19:24-07:00","2026-05-29T14:54:10-07:00","Approved",True),
-    ("Be Good Organix LLC","Richard McCausland",20000,"2026-06-04T07:34:37-07:00","2026-06-05T10:43:38-07:00","Approved",True),
-    ("AV Home Innovations LLC","Richard McCausland",None,"2026-06-02T09:18:18-07:00","2026-06-03T10:07:00-07:00","Approved",False),
-    ("Discovery Water Management LLC.","Jordan Koestner",25000,"2026-05-28T16:31:14-07:00","2026-05-29T11:05:18-07:00","Approved",True),
+# (rep, merchant, amount, prequal, sent, bank, udw, uw, declined) as DAYS AGO
+DEMO = [
+    ("Nathan Wilkie",     "Rockwell",                30000, 60, 52, 50, 49, 47, None),  # stuck in UW (S5)
+    ("Nathan Wilkie",     "Lynette Escobar Tiling",  15000,  9,  7, None, None, None, None),  # stuck S2
+    ("Richard McCausland","Exp Lyft LLC",            15000, 20, 18, 16, 15, 13, None),  # stuck in UW (S5)
+    ("Richard McCausland","Cars R Us",              100000, 14, 12, 10,  9,  8,    6),  # declined
+    ("Richard McCausland","Be Good Organix LLC",     20000,  5,  3,  2,  1, None, None),# in S4
+    ("Jordan Koestner",   "TG Deals LLC",            15000, 30, None, None, None, None, None),  # pre-app stall (S1)
+    ("Jordan Koestner",   "Discovery Water Mgmt",    25000,  4,  3,  2, None, None, None),  # in S3
 ]
 
-DECLINED_DEMO = {"TG Deals LLC", "Cars R Us"}    # show these as recent declines
-
 def build_context_demo():
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    ago = lambda d: (now - timedelta(days=d)).isoformat() if d is not None else None
     rows = []
-    for m, rep, amt, uw, dec_t, dec, note in SAMPLE:
-        if m in DECLINED_DEMO:
-            rows.append({"rep": rep, "merchant": m, "amount": amt, "stage": "Declined",
-                         "has_note": note, "decision": "Declined", "submitted": uw, "_open": False,
-                         "S1": None, "S2": None, "S3": None, "S4": delta_days(uw, dec_t)})
-        else:
-            rows.append({"rep": rep, "merchant": m, "amount": amt, "stage": "UW / Stips Needed",
-                         "has_note": note, "decision": None, "submitted": uw, "_open": True,
-                         "S1": None, "S2": None, "S3": None, "S4": delta_days(uw, now_iso)})
+    for rep, m, amt, pq, sn, bk, ud, uwd, dec in DEMO:
+        pq_t, sn_t, bk_t, ud_t, uw_t, dec_t = (ago(pq), ago(sn), ago(bk),
+                                               ago(ud), ago(uwd), ago(dec))
+        segs, open_key, open_age, is_open, _ = compute_segments(
+            pq_t, sn_t, bk_t, ud_t, uw_t, dec_t, now_iso)
+        status = ("Declined" if dec_t else
+                  "UW / Stips Needed" if uw_t else
+                  "App in Bank" if bk_t else
+                  "App Sent" if sn_t else "Pre-Qual Received")
+        rows.append({"rep": rep, "merchant": m, "amount": amt, "stage": status,
+                     "submitted": sn_t or pq_t, "decision": "Declined" if dec_t else None,
+                     "_open": is_open, "_open_key": open_key, "_open_age": open_age,
+                     "_last": now_iso, **segs})
     return assemble(rows, now_iso, mode="demo")
 
 # ----------------------------------------------------------------------------

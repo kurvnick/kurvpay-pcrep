@@ -54,7 +54,9 @@ THRESHOLDS = {                              # (fast_max, watch_max) in DAYS
     "S4": (2.0, 7.0),
 }
 
-LOOKBACK_DAYS = 120
+LOOKBACK_DAYS = 120          # how far back to FETCH transitions (keep generous so
+                             # long-cycle deals decided recently still resolve)
+ACTIVE_WINDOW_DAYS = 30      # only DISPLAY rows with funnel activity in this window
 STATE_FILE    = "udw_snapshot_state.json"
 OUTPUT_FILE   = "index.html"
 
@@ -200,6 +202,11 @@ def delta_days(a, b):
     return round((_parse(b) - _parse(a)).total_seconds() / 86400, 2)
 
 
+def _max_ts(*ts):
+    vals = [_parse(t) for t in ts if t]
+    return max(vals) if vals else None
+
+
 def build_context_live():
     token = _access_token()
     cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
@@ -220,7 +227,7 @@ def build_context_live():
             if pid not in decision or _parse(t) < _parse(decision[pid][0]):
                 decision[pid] = (t, stage)
     deals = fetch_records(token, "Deals",
-                          ["id", "Deal_Name", "Owner", "Stage", "Amount", "UDW_Notes"],
+                          ["id", "Deal_Name", "Owner", "Stage", "Amount", "UDW_Notes", "Created_Time"],
                           set(uw) | set(decision))
 
     state = update_udw_snapshot(load_state(), deals, now_iso)
@@ -250,16 +257,21 @@ def build_context_live():
         d = deals.get(did, {}) if did else {}
         udw_first = state.get(did) if did else None
         dec = decision.get(did) if did else None
+        bank_t = bank.get(lid)
+        uw_t = uw.get(did) if did else None
+        dec_t = dec[0] if dec else None
         rows.append({
             "rep": ID_TO_REP[owner],
             "merchant": d.get("Deal_Name") or name,
             "amount": d.get("Amount"),
             "stage": d.get("Stage") or "Lead",
             "has_note": bool((d.get("UDW_Notes") or "").strip()),
-            "S1": delta_days(anchor_t, bank.get(lid)),
-            "S2": delta_days(bank.get(lid), udw_first),
-            "S3": delta_days(udw_first, uw.get(did) if did else None),
-            "S4": delta_days(uw.get(did) if did else None, dec[0] if dec else None),
+            "submitted": d.get("Created_Time") or anchor_t,
+            "_last": _max_ts(anchor_t, bank_t, udw_first, uw_t, dec_t),
+            "S1": delta_days(anchor_t, bank_t),
+            "S2": delta_days(bank_t, udw_first),
+            "S3": delta_days(udw_first, uw_t),
+            "S4": delta_days(uw_t, dec_t),
             "decision": dec[1] if dec else None,
         })
 
@@ -274,18 +286,26 @@ def build_context_live():
             continue
         udw_first = state.get(did)
         dec = decision.get(did)
+        uw_t = uw.get(did)
+        dec_t = dec[0] if dec else None
         rows.append({
             "rep": ID_TO_REP[owner],
             "merchant": d.get("Deal_Name") or "(deal)",
             "amount": d.get("Amount"),
             "stage": d.get("Stage") or "",
             "has_note": bool((d.get("UDW_Notes") or "").strip()),
+            "submitted": d.get("Created_Time"),
+            "_last": _max_ts(d.get("Created_Time"), udw_first, uw_t, dec_t),
             "S1": None,
             "S2": None,
-            "S3": delta_days(udw_first, uw.get(did)),
-            "S4": delta_days(uw.get(did), dec[0] if dec else None),
+            "S3": delta_days(udw_first, uw_t),
+            "S4": delta_days(uw_t, dec_t),
             "decision": dec[1] if dec else None,
         })
+
+    # Drop rows with no funnel activity inside the active window.
+    active_cut = datetime.now(timezone.utc) - timedelta(days=ACTIVE_WINDOW_DAYS)
+    rows = [r for r in rows if r["_last"] and r["_last"] >= active_cut]
 
     return assemble(rows, now_iso, mode="live")
 
@@ -330,6 +350,14 @@ def _fmt_days(v):
 def _fmt_amount(a):
     return "" if a in (None, 0) else f"${a:,.0f}"
 
+def _fmt_date(iso):
+    if not iso:
+        return ""
+    try:
+        return _parse(iso).astimezone().strftime("%b %-d")
+    except Exception:
+        return ""
+
 def _seg_cell(seg_key, value):
     cls = speed(seg_key, value)
     val = _fmt_days(value) if value is not None else "pending"
@@ -345,10 +373,13 @@ def _deal_row(d):
     track = "".join(_seg_cell(k, d.get(k)) for k in ("S1", "S2", "S3", "S4"))
     dec = d.get("decision") or d.get("stage") or ""
     dec_cls = "ok" if dec == "Approved" else ("bad" if dec == "Declined" else "neutral")
+    sub = _fmt_date(d.get("submitted"))
+    meta = " \u00b7 ".join(x for x in (_fmt_amount(d.get("amount")),
+                                       (f"Sub {sub}" if sub else "")) if x)
     return f"""
     <div class="row">
       <div class="row__id"><span class="merchant">{_html.escape(str(d['merchant']))}</span>
-        <span class="amt">{_fmt_amount(d.get('amount'))}</span></div>
+        <span class="amt">{meta}</span></div>
       <div class="track">{track}</div>
       <div class="row__end"><span class="stage stage--{dec_cls}">{_html.escape(dec)}</span>{flag}</div>
     </div>"""
@@ -455,7 +486,8 @@ def render_html(ctx) -> str:
     <p class="eyebrow">Management Monitor \u00b7 Confidential</p>
     <h1>Underwriting Velocity</h1>
     <p class="sub">Clock starts when a rep moves a lead to <b>Sent App to Merchant</b>.
-      Tracking <b>{len(REPS)} reps</b> through to approval / decline. Struggling reps surface first.</p>
+      Tracking <b>{len(REPS)} reps</b>, deals active in the last <b>{ACTIVE_WINDOW_DAYS} days</b>.
+      Struggling reps surface first.</p>
   </div><div>
     <p class="gen">Generated<br>{gen}</p>
     <div class="controls"><button class="ctl" id="flagBtn">Flagged only</button>
@@ -519,7 +551,7 @@ SAMPLE = [
 
 def build_context_demo():
     rows = [{"rep": rep, "merchant": m, "amount": amt, "stage": dec, "has_note": note,
-             "decision": dec, "S1": None, "S2": None, "S3": None,
+             "decision": dec, "submitted": uw, "S1": None, "S2": None, "S3": None,
              "S4": delta_days(uw, dec_t)}
             for m, rep, amt, uw, dec_t, dec, note in SAMPLE]
     return assemble(rows, datetime.now(timezone.utc).isoformat(), mode="demo")

@@ -218,24 +218,32 @@ def build_context_live():
     leads = fetch_records(token, "Leads",
                           ["id", "Company", "Last_Name", "Owner"], sent.keys())
 
-    # Deal side — underwriting + decision transitions.
-    uw = _earliest(fetch_deal_transitions(token, UW_STIPS, cutoff), "Potential_Name")
-    decision = {}
-    for stage in DECISION_STAGES:
-        for pid, t in _earliest(fetch_deal_transitions(token, stage, cutoff),
-                                "Potential_Name").items():
-            if pid not in decision or _parse(t) < _parse(decision[pid][0]):
-                decision[pid] = (t, stage)
+    # Deal side. Approvals are EXCLUDED entirely. Declines are kept (closed,
+    # shown with the time they took). Everything else still open is in-flight.
+    uw       = _earliest(fetch_deal_transitions(token, UW_STIPS, cutoff), "Potential_Name")
+    approved = _earliest(fetch_deal_transitions(token, "Approved", cutoff), "Potential_Name")
+    declined = _earliest(fetch_deal_transitions(token, "Declined", cutoff), "Potential_Name")
+    approved_ids = set(approved)
+
     deals = fetch_records(token, "Deals",
                           ["id", "Deal_Name", "Owner", "Stage", "Amount", "UDW_Notes", "Created_Time"],
-                          set(uw) | set(decision))
+                          set(uw) | set(declined))
 
     state = update_udw_snapshot(load_state(), deals, now_iso)
     save_state(state)
 
+    def deal_seg(did):
+        """(S4, decision, open?, last_event_ts) for a deal."""
+        uw_t = uw.get(did)
+        dec_t = declined.get(did)
+        if dec_t:                                    # closed: declined
+            return (delta_days(uw_t, dec_t) if uw_t else None, "Declined", False, dec_t)
+        if uw_t:                                     # open: still in underwriting
+            return (delta_days(uw_t, now_iso), None, True, uw_t)
+        return (None, None, False, None)
+
     # Match leads to deals by normalized merchant name (Converted_Deal is empty
-    # in this org). Unmatched deals still render on their own (section B) so
-    # underwriting history is never hidden.
+    # in this org). Unmatched deals still render on their own (B).
     deal_by_name = {}
     for did, d in deals.items():
         n = _norm(d.get("Deal_Name"))
@@ -244,7 +252,7 @@ def build_context_live():
 
     rows, used = [], set()
 
-    # (A) Lead-anchored rows: every app a rep pushed to Sent App to Merchant.
+    # (A) Lead-anchored rows, EXCLUDING any whose deal was approved.
     for lid, anchor_t in sent.items():
         lead = leads.get(lid, {})
         owner = (lead.get("Owner") or {}).get("id")
@@ -252,60 +260,65 @@ def build_context_live():
             continue
         name = lead.get("Company") or lead.get("Last_Name") or "(unnamed lead)"
         did = deal_by_name.get(_norm(lead.get("Company") or lead.get("Last_Name")))
+        if did and did in approved_ids:
+            used.add(did)
+            continue
         if did:
             used.add(did)
         d = deals.get(did, {}) if did else {}
         udw_first = state.get(did) if did else None
-        dec = decision.get(did) if did else None
         bank_t = bank.get(lid)
         uw_t = uw.get(did) if did else None
-        dec_t = dec[0] if dec else None
+        s4, decision, is_open, dlast = deal_seg(did) if did else (None, None, False, None)
         rows.append({
             "rep": ID_TO_REP[owner],
             "merchant": d.get("Deal_Name") or name,
             "amount": d.get("Amount"),
-            "stage": d.get("Stage") or "Lead",
+            "stage": "Declined" if decision == "Declined" else (d.get("Stage") or "Lead"),
             "has_note": bool((d.get("UDW_Notes") or "").strip()),
             "submitted": d.get("Created_Time") or anchor_t,
-            "_last": _max_ts(anchor_t, bank_t, udw_first, uw_t, dec_t),
+            "_last": _max_ts(anchor_t, bank_t, udw_first, uw_t, dlast),
+            "_open": is_open,
             "S1": delta_days(anchor_t, bank_t),
             "S2": delta_days(bank_t, udw_first),
             "S3": delta_days(udw_first, uw_t),
-            "S4": delta_days(uw_t, dec_t),
-            "decision": dec[1] if dec else None,
+            "S4": s4,
+            "decision": decision,
         })
 
-    # (B) Deal-only rows: underwriting deals not tied to a tracked lead (Sent App
-    # predates the lookback, or the name didn't match). Attributed by the deal's
-    # own Owner so S3/S4 history always surfaces.
-    for did, d in deals.items():
-        if did in used:
+    # (B) Deal-only rows: in-UW or declined deals (never approved) not matched
+    # to a tracked lead. Attributed by the deal's own Owner.
+    for did in (set(uw) | set(declined)):
+        if did in used or did in approved_ids:
             continue
+        d = deals.get(did, {})
         owner = (d.get("Owner") or {}).get("id")
         if owner not in REP_IDS:
             continue
         udw_first = state.get(did)
-        dec = decision.get(did)
         uw_t = uw.get(did)
-        dec_t = dec[0] if dec else None
+        s4, decision, is_open, dlast = deal_seg(did)
         rows.append({
             "rep": ID_TO_REP[owner],
             "merchant": d.get("Deal_Name") or "(deal)",
             "amount": d.get("Amount"),
-            "stage": d.get("Stage") or "",
+            "stage": "Declined" if decision == "Declined" else (d.get("Stage") or ""),
             "has_note": bool((d.get("UDW_Notes") or "").strip()),
             "submitted": d.get("Created_Time"),
-            "_last": _max_ts(d.get("Created_Time"), udw_first, uw_t, dec_t),
+            "_last": _max_ts(d.get("Created_Time"), udw_first, uw_t, dlast),
+            "_open": is_open,
             "S1": None,
             "S2": None,
             "S3": delta_days(udw_first, uw_t),
-            "S4": delta_days(uw_t, dec_t),
-            "decision": dec[1] if dec else None,
+            "S4": s4,
+            "decision": decision,
         })
 
-    # Drop rows with no funnel activity inside the active window.
+    # Open deals always show (an old one = a live stall). Declines and stale
+    # early-funnel leads are pruned to recent activity by the active window.
     active_cut = datetime.now(timezone.utc) - timedelta(days=ACTIVE_WINDOW_DAYS)
-    rows = [r for r in rows if r["_last"] and r["_last"] >= active_cut]
+    rows = [r for r in rows
+            if r["_open"] or (r["_last"] and r["_last"] >= active_cut)]
 
     return assemble(rows, now_iso, mode="live")
 
@@ -317,11 +330,15 @@ def assemble(rows, now_iso, mode):
     reps = []
     for name, deals in by_rep.items():
         s4s = [d["S4"] for d in deals if d["S4"] is not None]
+        # a "stall" is an OPEN deal stuck in underwriting past the watch line;
+        # a declined deal is closed and doesn't count, even if it took a while.
         stalls = sum(1 for d in deals
-                     if d["S4"] is not None and speed("S4", d["S4"]) == "slow")
+                     if d.get("_open") and d["S4"] is not None
+                     and speed("S4", d["S4"]) == "slow")
         reps.append({
             "name": name,
-            "deals": sorted(deals, key=lambda d: (d["S4"] is None, -(d["S4"] or 0))),
+            "deals": sorted(deals, key=lambda d: (not d.get("_open"),
+                                                  d["S4"] is None, -(d["S4"] or 0))),
             "n": len(deals),
             "median_s4": round(statistics.median(s4s), 1) if s4s else None,
             "worst_s4": max(s4s) if s4s else None,
@@ -339,7 +356,7 @@ SEG_LABELS = {
     "S1": "Sent App \u2192 App in Bank",
     "S2": "App in Bank \u2192 UDW Note",
     "S3": "UDW Note \u2192 UW / Stips",
-    "S4": "UW / Stips \u2192 Decision",
+    "S4": "Time in UW / Stips",
 }
 
 def _fmt_days(v):
@@ -366,9 +383,9 @@ def _seg_cell(seg_key, value):
 
 def _deal_row(d):
     flag = ""
-    if d["S4"] is not None and speed("S4", d["S4"]) == "slow":
+    if d.get("_open") and d["S4"] is not None and speed("S4", d["S4"]) == "slow":
         flag = '<span class="flag">UW stall</span>'
-    elif d["S4"] is not None and speed("S4", d["S4"]) == "watch":
+    elif d.get("_open") and d["S4"] is not None and speed("S4", d["S4"]) == "watch":
         flag = '<span class="flag flag--watch">watch</span>'
     track = "".join(_seg_cell(k, d.get(k)) for k in ("S1", "S2", "S3", "S4"))
     dec = d.get("decision") or d.get("stage") or ""
@@ -387,15 +404,15 @@ def _deal_row(d):
 def _rep_card(rep):
     stall_cls = "metric__v--bad" if rep["stalls"] else ""
     rows = "".join(_deal_row(d) for d in rep["deals"]) or \
-           '<div class="empty">No leads at Sent App to Merchant in the window.</div>'
+           '<div class="empty">No in-flight deals in the window.</div>'
     flagged = "rep--flagged" if rep["stalls"] else ""
     return f"""
     <section class="rep {flagged}" data-stalls="{rep['stalls']}" data-name="{_html.escape(rep['name'])}">
       <header class="rep__head"><h2 class="rep__name">{_html.escape(rep['name'])}</h2>
         <div class="rep__metrics">
-          <div class="metric"><span class="metric__k">Deals</span><span class="metric__v">{rep['n']}</span></div>
-          <div class="metric"><span class="metric__k">Median UW\u2192Decision</span><span class="metric__v">{_fmt_days(rep['median_s4'])}</span></div>
-          <div class="metric"><span class="metric__k">Worst</span><span class="metric__v">{_fmt_days(rep['worst_s4'])}</span></div>
+          <div class="metric"><span class="metric__k">In-flight</span><span class="metric__v">{rep['n']}</span></div>
+          <div class="metric"><span class="metric__k">Median days in UW</span><span class="metric__v">{_fmt_days(rep['median_s4'])}</span></div>
+          <div class="metric"><span class="metric__k">Oldest</span><span class="metric__v">{_fmt_days(rep['worst_s4'])}</span></div>
           <div class="metric"><span class="metric__k">Stalls</span><span class="metric__v {stall_cls}">{rep['stalls']}</span></div>
         </div></header>
       <div class="rep__rows">{rows}</div>
@@ -404,7 +421,7 @@ def _rep_card(rep):
 def render_html(ctx) -> str:
     gen = _parse(ctx["generated"]).astimezone().strftime("%b %-d, %Y \u00b7 %-I:%M %p")
     banner = "" if ctx["mode"] == "live" else (
-        '<div class="banner">Sample view \u2014 real UW\u2192Decision history for 8 deals. '
+        '<div class="banner">Sample view \u2014 in-flight deals with real time-in-underwriting. '
         'S1\u2013S3 populate on the scheduled run (S2/S3 accrue forward from first snapshot).</div>')
     cards = "".join(_rep_card(r) for r in ctx["reps"])
     legend = "".join(f'<span class="lg"><b>{k}</b> {v}</span>' for k, v in SEG_LABELS.items())
@@ -486,8 +503,8 @@ def render_html(ctx) -> str:
     <p class="eyebrow">Management Monitor \u00b7 Confidential</p>
     <h1>Underwriting Velocity</h1>
     <p class="sub">Clock starts when a rep moves a lead to <b>Sent App to Merchant</b>.
-      Tracking <b>{len(REPS)} reps</b>, deals active in the last <b>{ACTIVE_WINDOW_DAYS} days</b>.
-      Struggling reps surface first.</p>
+      <b>In-flight deals plus recent declines</b> (approvals excluded), across <b>{len(REPS)} reps</b>.
+      Most stuck in underwriting surface first.</p>
   </div><div>
     <p class="gen">Generated<br>{gen}</p>
     <div class="controls"><button class="ctl" id="flagBtn">Flagged only</button>
@@ -496,11 +513,13 @@ def render_html(ctx) -> str:
   <div class="legend">{legend}</div>
   {banner}
   <div id="reps">{cards}</div>
-  <div class="foot"><b>How to read this.</b> Each deal is one row; the four cells are time spent in each
-    funnel segment, colored by speed. <b>S1</b> and <b>S4</b> come from CRM status history. <b>S2</b> and
-    <b>S3</b> depend on when UDW Notes first gets a value \u2014 a field CRM does not history-track \u2014 so they
-    accrue forward from the first scheduled run and read <i>pending</i> until then. Edit the roster at the
-    top of the script; the dashboard rebuilds around whoever is listed.</div>
+  <div class="foot"><b>How to read this.</b> Each row is an in-flight deal or a recent decline;
+    approvals are excluded. <b>S1</b>\u2013<b>S3</b> are completed segment times from CRM status history.
+    <b>S4</b> is time in UW / Stips \u2014 still counting for open deals (a red S4 is a live stall), or the
+    time it took to decline for closed ones. Stall flags and the stall count apply only to open deals;
+    declines show a red <i>Declined</i> chip. <b>S2</b>/<b>S3</b> depend on when UDW Notes first gets a
+    value, which CRM does not history-track, so they accrue forward from the first scheduled run and read
+    <i>pending</i> until then. Edit the roster at the top of the script to change who is tracked.</div>
 </div>
 <script>
   var flagOnly=false, sortMode='stalls', box=document.getElementById('reps');
@@ -549,12 +568,21 @@ SAMPLE = [
     ("Discovery Water Management LLC.","Jordan Koestner",25000,"2026-05-28T16:31:14-07:00","2026-05-29T11:05:18-07:00","Approved",True),
 ]
 
+DECLINED_DEMO = {"TG Deals LLC", "Cars R Us"}    # show these as recent declines
+
 def build_context_demo():
-    rows = [{"rep": rep, "merchant": m, "amount": amt, "stage": dec, "has_note": note,
-             "decision": dec, "submitted": uw, "S1": None, "S2": None, "S3": None,
-             "S4": delta_days(uw, dec_t)}
-            for m, rep, amt, uw, dec_t, dec, note in SAMPLE]
-    return assemble(rows, datetime.now(timezone.utc).isoformat(), mode="demo")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for m, rep, amt, uw, dec_t, dec, note in SAMPLE:
+        if m in DECLINED_DEMO:
+            rows.append({"rep": rep, "merchant": m, "amount": amt, "stage": "Declined",
+                         "has_note": note, "decision": "Declined", "submitted": uw, "_open": False,
+                         "S1": None, "S2": None, "S3": None, "S4": delta_days(uw, dec_t)})
+        else:
+            rows.append({"rep": rep, "merchant": m, "amount": amt, "stage": "UW / Stips Needed",
+                         "has_note": note, "decision": None, "submitted": uw, "_open": True,
+                         "S1": None, "S2": None, "S3": None, "S4": delta_days(uw, now_iso)})
+    return assemble(rows, now_iso, mode="demo")
 
 # ----------------------------------------------------------------------------
 # MAIN

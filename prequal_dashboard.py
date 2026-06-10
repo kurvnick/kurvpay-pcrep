@@ -28,6 +28,7 @@ back to the repo (see the updated inday_report.yml).
 from __future__ import annotations
 import os, sys, re, io, json, zipfile, statistics
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 import requests
 
 # ----------------------------------------------------------------------------
@@ -57,6 +58,7 @@ THRESHOLDS = {                              # (fast_max, watch_max) in DAYS
 LOOKBACK_DAYS = 120          # how far back to FETCH transitions (keep generous so
                              # long-cycle deals decided recently still resolve)
 ACTIVE_WINDOW_DAYS = 30      # only DISPLAY rows with funnel activity in this window
+DISPLAY_TZ    = ZoneInfo("America/Los_Angeles")   # all displayed times in PT
 STATE_FILE    = "udw_snapshot_state.json"
 OUTPUT_FILE   = "index.html"
 
@@ -371,7 +373,7 @@ def _fmt_date(iso):
     if not iso:
         return ""
     try:
-        return _parse(iso).astimezone().strftime("%b %-d")
+        return _parse(iso).astimezone(DISPLAY_TZ).strftime("%b %-d")
     except Exception:
         return ""
 
@@ -419,7 +421,7 @@ def _rep_card(rep):
     </section>"""
 
 def render_html(ctx) -> str:
-    gen = _parse(ctx["generated"]).astimezone().strftime("%b %-d, %Y \u00b7 %-I:%M %p")
+    gen = _parse(ctx["generated"]).astimezone(DISPLAY_TZ).strftime("%b %-d, %Y \u00b7 %-I:%M %p PT")
     banner = "" if ctx["mode"] == "live" else (
         '<div class="banner">Sample view \u2014 in-flight deals with real time-in-underwriting. '
         'S1\u2013S3 populate on the scheduled run (S2/S3 accrue forward from first snapshot).</div>')

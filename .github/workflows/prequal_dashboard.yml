@@ -1,6 +1,6 @@
 name: PreQual Funnel Dashboard
 
-# Drives generate_report.py (now the underwriting-velocity dashboard).
+# Drives prequal_dashboard.py (the underwriting-velocity dashboard).
 # Reuses the existing repo secrets, so no new refresh token is needed.
 
 on:
@@ -35,7 +35,7 @@ jobs:
           ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
           ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
           TIINY_API_KEY:      ${{ secrets.TIINY_API_KEY }}
-        run: python "Prequal dashboard.py"      # quoted because of the space in the filename
+        run: python prequal_dashboard.py
 
       - name: Persist UDW snapshot state
         run: |

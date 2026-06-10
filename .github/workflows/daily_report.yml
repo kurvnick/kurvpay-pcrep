@@ -1,20 +1,21 @@
-name: PC In-Day Activity Report
+name: PreQual Funnel Dashboard
 
-# NOTE: same workflow name + filename as before, so your cron-job.org
-# workflow_dispatch trigger keeps working unchanged. Same repo secrets.
+# Drives generate_report.py (now the underwriting-velocity dashboard).
+# Reuses the existing repo secrets, so no new refresh token is needed.
 
 on:
   schedule:
-    # Every 30 min, 8am-6pm PT (unchanged from the old In-Day report).
-    - cron: '0,30 15-23 * * 1-5'
-    - cron: '0,30 0-1 * * 2-6'
+    # Hourly, 8am-6pm PT, Mon-Fri (more frequent runs = tighter S2/S3 snapshots).
+    # Dial back to once a day if you prefer: '0 15 * * 1-5'
+    - cron: '0 15-23 * * 1-5'
+    - cron: '0 0-1 * * 2-6'
   workflow_dispatch:
 
 permissions:
-  contents: write          # needed so the snapshot state can be committed back
+  contents: write          # lets the UDW snapshot state get committed back
 
 jobs:
-  generate-inday-report:
+  prequal-funnel-dashboard:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repo
@@ -34,7 +35,7 @@ jobs:
           ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
           ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
           TIINY_API_KEY:      ${{ secrets.TIINY_API_KEY }}
-        run: python generate_inday_report.py
+        run: python generate_report.py          # <-- must match your filename exactly
 
       - name: Persist UDW snapshot state
         run: |

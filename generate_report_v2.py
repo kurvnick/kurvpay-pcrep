@@ -22,7 +22,7 @@ TIINY_DOMAIN       = "paymentcloudcallstats-v2.tiiny.site"
 REP_LAST_TO_FULL = {
     "Gilden":"Brandon Gilden","Green":"Brisa Green","Heflin":"Bryan Heflin",
     "Kopstein":"Cheryl Kopstein","Jackson":"Daniel Jackson","Weiss":"Eric Weiss",
-    "Travis":"Faith Travis","Riffe":"Frank Riffe","Vartevanian":"Hovak Vartevanian",
+    "Riffe":"Frank Riffe","Vartevanian":"Hovak Vartevanian",
     "Todd":"Jessie Todd","Colovas":"John Colovas","Lotut":"Jonathan Lotut",
     "Koestner":"Jordan Koestner","Landeros":"Julian Landeros","Margolis":"Julie Margolis",
     "Villasenor":"Kirstan Villasenor","Friedhoff":"Matthew Friedhoff","Crozier":"Max Crozier",
@@ -32,7 +32,7 @@ REP_LAST_TO_FULL = {
 }
 CONLAN = {"Kopstein","Silva","Friedhoff","Riley","Weiss","Vartevanian",
           "Colovas","Green","Crozier","Landeros","Riffe","Todd"}
-STOKOE = {"Daleske","Heflin","Travis","Villasenor","Margolis","Jackson","Lotut",
+STOKOE = {"Daleske","Heflin","Villasenor","Margolis","Jackson","Lotut",
           "Koestner","Wilkie","Gilden","Bender","Carranza","McCausland"}
 ALL_REPS = set(REP_LAST_TO_FULL.keys())
 APPROVAL_STAGES = ["Approved", "Conditionally Approved", "Auto Approved", "Auto Approved New"]
